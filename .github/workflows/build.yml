@@ -77,10 +77,10 @@ jobs:
           APP=$(find build -type d -name "Psyduck.app" | head -1)
           echo "app at: $APP"
           ls -la "$APP"
-          # 主二进制 fake-sign（缺 entitlements 也能签）
-          [ -f "$APP/Psyduck" ] && ldid -S "$APP/Psyduck" || echo "WARN: main binary missing"
-          # helper
-          if [ -f "$APP/PsyduckHelper" ]; then ldid -S "$APP/PsyduckHelper"; else echo "WARN: helper missing"; fi
+          # 主二进制 fake-sign + entitlements（TrollStore 会保留这些权限）
+          [ -f "$APP/Psyduck" ] && ldid -Send_app.plist "$APP/Psyduck" || echo "WARN: main binary missing"
+          # helper: no-sandbox + persona-mgmt → posix_spawn 即 root
+          if [ -f "$APP/PsyduckHelper" ]; then ldid -Sent_helper.plist "$APP/PsyduckHelper"; else echo "WARN: helper missing"; fi
           # 嵌入的 NodeMobile 动态库也要 fake-sign
           if [ -d "$APP/Frameworks" ]; then
             find "$APP/Frameworks" -type f \( -name "*.dylib" -o -perm +111 \) | while read -r f; do ldid -S "$f" || true; done
