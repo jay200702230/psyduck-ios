@@ -25,6 +25,8 @@ targets:
       - path: Resources/payload_dir
         buildPhase: resources
         type: folder
+      - path: Resources/AppIcon.png
+        buildPhase: resources
       - path: Resources/PsyduckHelper
         buildPhase: sources
     settings:
@@ -43,6 +45,10 @@ targets:
       path: src/Info.plist
       properties:
         CFBundleDisplayName: psyduck
+        CFBundleIconFiles: [AppIcon.png]
+        CFBundleIcons:
+          CFBundlePrimaryIcon:
+            CFBundleIconFiles: [AppIcon.png]
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSAppTransportSecurity:

@@ -11,32 +11,45 @@ enum NodeMobileBridge {
             return
         }
         started = true
+        argsForNode = args
         DispatchQueue.global(qos: .default).async {
             redirectStdout(onLine)
-            // node_start 符号在 NodeMobile.framework 的二进制里（主程序已 link，符号全局可见）
-            let handle = dlopen(nil, RTLD_NOW)
-            var sym = dlsym(handle, "node_start")
-            if sym == nil {
-                for name in ["libnode.108.dylib", "libnode.dylib", "node"] {
-                    if let h = dlopen(name, RTLD_NOW) {
-                        if let s2 = dlsym(h, "node_start") { sym = s2; break }
-                    }
-                }
+            // node 主线程必须大栈: GCD 全局队列线程默认 ~512KB, 脚本一 import 就栈溢出闪退
+            let t = Thread {
+                runNode(onLine)
             }
-            guard let s = sym else {
-                onLine("[node] node_start symbol not found")
-                return
-            }
-            typealias NodeStart = @convention(c) (Int32, UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Int32
-            let fn = unsafeBitCast(s, to: NodeStart.self)
-            var cargs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0)! }
-            cargs.append(nil)
-            let argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: cargs.count)
-            for (i, p) in cargs.enumerated() { argv[i] = p }
-            let rc = fn(Int32(args.count), argv)
-            onLine("[node] exited rc=\(rc)")
+            t.stackSize = 32 << 20
+            t.name = "nodejs-main"
+            t.start()
         }
     }
+
+    private static func runNode(_ onLine: @escaping (String) -> Void) {
+        // node_start 符号在 NodeMobile.framework 的二进制里（主程序已 link，符号全局可见）
+        let handle = dlopen(nil, RTLD_NOW)
+        var sym = dlsym(handle, "node_start")
+        if sym == nil {
+            for name in ["libnode.108.dylib", "libnode.dylib", "node"] {
+                if let h = dlopen(name, RTLD_NOW) {
+                    if let s2 = dlsym(h, "node_start") { sym = s2; break }
+                }
+            }
+        }
+        guard let s = sym else {
+            onLine("[node] node_start symbol not found")
+            return
+        }
+        typealias NodeStart = @convention(c) (Int32, UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Int32
+        let fn = unsafeBitCast(s, to: NodeStart.self)
+        var cargs: [UnsafeMutablePointer<CChar>?] = argsForNode.map { strdup($0)! }
+        cargs.append(nil)
+        let argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: cargs.count)
+        for (i, p) in cargs.enumerated() { argv[i] = p }
+        let rc = fn(Int32(argsForNode.count), argv)
+        onLine("[node] exited rc=\(rc)")
+    }
+
+    static var argsForNode: [String] = []
 
     /// stdout/stderr → pipe → 逐行喂 onLine（node 的 console.log 全靠这条进 UI）
     private static func redirectStdout(_ onLine: @escaping (String) -> Void) {
