@@ -403,8 +403,9 @@ enum NodeRunner {
         try? FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
         setenv("TMPDIR", tmpDir, 1)
         onLine("[node] starting: \(entry)")
-        // --no-jitless: nodejs-mobile 默认 jitless 禁了 WASM; TrollStore JIT entitlements 允许真 JIT
-        let args = ["node", "--no-jitless", "--expose-wasm", entry]
+        // 注意: 不能开 --no-jitless (V8 真 JIT 在 iOS 被内核 W^X 拒 → node 一起动直接 SIGKILL 闪退)
+        // WASM 缺失无碍任务执行 (本地 sim 验证), Intl 由 shim polyfill
+        let args = ["node", entry]
         NodeMobileBridge.startNode(args: args, onLine: onLine)
     }
 }
