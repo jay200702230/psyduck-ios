@@ -73,14 +73,15 @@ enum JDHelper {
         guard !conts.isEmpty else { return hits }
 
         var files = 0, scanned = 0, totalKB = 0
+        var seen = Set<String>()
         for c in conts {
-            walk(c, depth: 0, verbose: verbose, into: &hits, files: &files, scanned: &scanned, kb: &totalKB, onLine: onLine)
+            walk(c, depth: 0, verbose: verbose, into: &hits, seen: &seen, files: &files, scanned: &scanned, kb: &totalKB, onLine: onLine)
         }
         onLine("[scan] files=\(files) scanned=\(scanned) totalKB=\(totalKB) hits=\(hits.count)")
         return hits
     }
 
-    private static func walk(_ dir: String, depth: Int, verbose: Bool, into hits: inout [Hit], files: inout Int, scanned: inout Int, kb: inout Int, onLine: @escaping (String) -> Void) {
+    private static func walk(_ dir: String, depth: Int, verbose: Bool, into hits: inout [Hit], seen: inout Set<String>, files: inout Int, scanned: inout Int, kb: inout Int, onLine: @escaping (String) -> Void) {
         if depth > 8 { return }
         let fm = FileManager.default
         let names = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
@@ -94,11 +95,11 @@ enum JDHelper {
             guard lstat(p, &st) == 0 else { continue }
             let fmt = st.st_mode & S_IFMT
             if fmt == S_IFDIR {
-                walk(p, depth: depth + 1, verbose: verbose, into: &hits, files: &files, scanned: &scanned, kb: &kb, onLine: onLine)
+                walk(p, depth: depth + 1, verbose: verbose, into: &hits, seen: &seen, files: &files, scanned: &scanned, kb: &kb, onLine: onLine)
             } else if fmt == S_IFREG {
                 files += 1
                 let sz = Int(st.st_size)
-                if sz > 256 * 1024 * 1024 {
+                if sz > 64 * 1024 * 1024 {
                     if verbose { onLine("[scan] skip big(\(sz)): \(p)") }
                     continue
                 }
@@ -109,7 +110,16 @@ enum JDHelper {
                 }
                 scanned += 1
                 kb += sz / 1024
-                hits += scanBuf(b, path: p)
+                // 全局硬上限 64 + 去重：SDK 日志/缓存里 app_open 能命中几万次, 不限直接 OOM 被 jetsam 杀
+                if hits.count < 64 {
+                    for h in scanBuf(b, path: p) {
+                        if hits.count >= 64 { break }
+                        let sig = h.key.isEmpty ? "p|\(h.pin)" : "k|\(h.key)"
+                        if seen.contains(sig) { continue }
+                        seen.insert(sig)
+                        hits.append(h)
+                    }
+                }
                 if scanned % 500 == 0 { onLine("[scan] …\(scanned) files") }
             }
         }
@@ -125,6 +135,7 @@ enum JDHelper {
             let sz = raw.count
             var i = 0
             while i < sz - 10 {
+                if out.count >= 16 { return } // 单文件上限, 防大日志文件百万次匹配
                 // 所有匹配串都以 'p' 或 'a' 开头，快速跳过
                 let c = b[i]
                 if c != 0x70 && c != 0x61 { i += 1; continue }
