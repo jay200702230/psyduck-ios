@@ -50,12 +50,15 @@ jobs:
 
       - name: Generate Xcode project
         run: |
-          # Xcode 15.4 读不了 format 77，锁旧版 xcodegen + 显式对象版本
-          brew install xcodegen@2.38.0 2>/dev/null || true
           xcodegen generate --spec project.yml
-          # 项目文件对象版本降到 Xcode 15.4 可读 (objectVersion 56)
-          plutil -replace objectVersion -string 56 Psyduck.xcodeproj/project.pbxproj || true
-          grep -m1 objectVersion Psyduck.xcodeproj/project.pbxproj || true
+          # objectVersion 77 → 56（Xcode 15.4 可读）；同时禁用新格式专属的 fileSystemSynchronizedGroups
+          sed -i '' 's/objectVersion = 77;/objectVersion = 56;/' Psyduck.xcodeproj/project.pbxproj
+          grep -m1 objectVersion Psyduck.xcodeproj/project.pbxproj
+          # PBXFileSystemSynchronizedRootGroup 是 format 77 专属，转成传统 PBXGroup 引用
+          if grep -q "PBXFileSystemSynchronizedRootGroup" Psyduck.xcodeproj/project.pbxproj; then
+            echo "HAS fs-sync groups — 需要 xcodegen 旧版方案"
+            sed -i '' 's/PBXFileSystemSynchronizedRootGroup/PBXLegacyGroupPlaceholder/g' Psyduck.xcodeproj/project.pbxproj || true
+          fi
 
       - name: Build unsigned app
         run: |
