@@ -29,7 +29,7 @@ struct ContentView: View {
                     start()
                 }
                 .disabled(running)
-                .buttonStyle(.bordered)
+                .buttonStyle(PlainButtonStyle())
             }
             .padding(.bottom, 20)
         }

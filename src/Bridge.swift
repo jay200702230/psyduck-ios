@@ -2,15 +2,15 @@ import Foundation
 
 /// root helper 桥：spawn PsyduckHelper (root, no-sandbox) 读京东沙箱 cookie
 enum JDHelper {
-    static let jdDataPathCandidates = [
-        "/var/mobile/Containers/Data/Application"  // 遍历找 com.360buy.jdmobile 的 .com.apple.mobile_container_manager.metadata.plist
-    ]
-
     /// 同步阻塞。onLine 逐行回调日志
     static func grabCookie(_ onLine: @escaping (String) -> Void) -> String {
-        let helper = Bundle.main.path(forAuxiliaryExecutable: "PsyduckHelper")!
+        let helper = Bundle.main.path(forAuxiliaryExecutable: "PsyduckHelper") ?? ""
+        if helper.isEmpty {
+            onLine("[helper] PsyduckHelper not in bundle")
+            return ""
+        }
         let out = runRoot(helper, args: ["cookie"], onLine: onLine)
-        // helper 输出格式: ###COOKIE###<整条cookie>###END### 之前的都是日志
+        // helper 输出格式: ###COOKIE###<整条cookie>###END###
         if let r = out.range(of: "###COOKIE###"),
            let e = out.range(of: "###END###") {
             return String(out[r.upperBound..<e.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -20,28 +20,42 @@ enum JDHelper {
 
     static func runRoot(_ bin: String, args: [String], onLine: @escaping (String) -> Void) -> String {
         // TrollStore 环境: app 无沙箱 + persona-mgmt → 直接 posix_spawn 即 root
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: bin)
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = pipe
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let s = String(data: data, encoding: .utf8) ?? ""
-            for line in s.components(separatedBy: "\n") where !line.isEmpty {
-                onLine("[helper] " + line)
-            }
-            return s
-        } catch {
-            onLine("[helper] spawn fail: \(error)")
+        // iOS 无 Foundation.Process → 用 posix_spawn
+        var pipeOut: [Int32] = [0, 0]
+        guard pipe(&pipeOut) == 0 else {
+            onLine("[helper] pipe fail")
             return ""
         }
+        var attr = posix_spawnattr_t()
+        posix_spawnattr_init(&attr)
+        var pid = pid_t(0)
+        let argvp: [UnsafeMutablePointer<CChar>?] = [strdup(bin), strdup("cookie"), nil]
+        var envp: [UnsafeMutablePointer<CChar>?] = [nil]
+        let rc = posix_spawn(&pid, bin, nil, &attr, argvp, envp)
+        guard rc == 0 else {
+            onLine("[helper] spawn fail rc=\(rc)")
+            return ""
+        }
+        close(pipeOut[1])
+        var data = Data()
+        let fd = pipeOut[0]
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n <= 0 { break }
+            data.append(contentsOf: buf[0..<n])
+        }
+        close(fd)
+        waitpid(pid, nil, 0)
+        let s = String(data: data, encoding: .utf8) ?? ""
+        for line in s.components(separatedBy: "\n") where !line.isEmpty && !line.contains("###COOKIE###") && !line.contains("###END###") {
+            onLine("[helper] " + line)
+        }
+        return s
     }
 }
 
-/// payload 解压 + cookie ini 写入
+/// payload 拷贝 + cookie ini 写入
 enum Payload {
     static var payloadDir: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -51,17 +65,10 @@ enum Payload {
     static func install(cookie: String) {
         let fm = FileManager.default
         let dst = payloadDir
-        // 首次解压（bundle 内 payload.zip → Documents/payload）
+        // 首次安装（bundle 内 payload_dir → Documents/payload）
         if !fm.fileExists(atPath: dst.path) {
-            if let zip = Bundle.main.url(forResource: "payload", withExtension: "zip") {
-                // iOS 无内置 unzip → 用 Process 不行（无沙箱可 spawn unzip? 无此二进制）→ 简易 ZIP 解包见 helper
-                // 这里改用 helper 解压（root helper 里有 unzip 逻辑不现实）
-                // 方案: payload.zip 同样由 Swift 简易解包 —— 直接把 zip 当 raw 拷贝留给 node 端解? 不行。
-                // 最稳: 构建期不 zip, 直接把 payload 文件拷进 bundle payload_dir/ 资源目录, 运行时整目录拷贝
-                let srcDir = Bundle.main.url(forResource: "payload_dir", withExtension: nil)
-                if let src = srcDir {
-                    try? fm.copyItem(at: src, to: dst)
-                }
+            if let src = Bundle.main.url(forResource: "payload_dir", withExtension: nil) {
+                try? fm.copyItem(at: src, to: dst)
             }
         }
         // 写 cookie/jd.ini
@@ -81,10 +88,9 @@ enum NodeRunner {
             onLine("[node] entry missing: main_ios.mjs")
             return
         }
-        // libnode 启动：nodejs-mobile 的 C API
-        // 简化: 用 NSThread 跑 node_start，stdout 重定向见 NodeMobile 框架约定
         onLine("[node] starting: \(entry)")
-        let args = [Bundle.main.path(forResource: "libnode", ofType: "dylib") ?? "", entry]
+        // argv[0] 是程序名
+        let args = ["node", entry]
         NodeMobileBridge.startNode(args: args, onLine: onLine)
     }
 }
