@@ -73,8 +73,15 @@ jobs:
         run: |
           APP=$(find build -type d -name "Psyduck.app" | head -1)
           echo "app at: $APP"
-          ldid -S "$APP/Psyduck"
-          ldid -S "$APP/PsyduckHelper" || true
+          ls -la "$APP"
+          # 主二进制 fake-sign（缺 entitlements 也能签）
+          [ -f "$APP/Psyduck" ] && ldid -S "$APP/Psyduck" || echo "WARN: main binary missing"
+          # helper
+          if [ -f "$APP/PsyduckHelper" ]; then ldid -S "$APP/PsyduckHelper"; else echo "WARN: helper missing"; fi
+          # 嵌入的 NodeMobile 动态库也要 fake-sign
+          if [ -d "$APP/Frameworks" ]; then
+            find "$APP/Frameworks" -type f \( -name "*.dylib" -o -perm +111 \) | while read -r f; do ldid -S "$f" || true; done
+          fi
           mkdir -p Payload
           cp -R "$APP" Payload/
           zip -qry psyduck-ios.ipa Payload
