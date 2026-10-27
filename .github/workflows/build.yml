@@ -78,9 +78,23 @@ jobs:
           echo "app at: $APP"
           ls -la "$APP"
           # 主二进制 fake-sign + entitlements（TrollStore 会保留这些权限）
-          [ -f "$APP/Psyduck" ] && ldid -Send_app.plist "$APP/Psyduck" || echo "WARN: main binary missing"
-          # helper: no-sandbox + persona-mgmt → posix_spawn 即 root
-          if [ -f "$APP/PsyduckHelper" ]; then ldid -Sent_helper.plist "$APP/PsyduckHelper"; else echo "WARN: helper missing"; fi
+          # 注意: -S 和文件名之间不能有空格, 且必须拼对: -S + ent_app.plist = -Sent_app.plist
+          test -f "$APP/Psyduck"
+          ldid -Sent_app.plist "$APP/Psyduck"
+          # 验尸: entitlements 必须嵌进主二进制, 缺了直接炸 CI（不许静默）
+          if ! ldid -e "$APP/Psyduck" | grep -q "no-sandbox"; then
+            echo "FATAL: no-sandbox entitlement missing from main binary"
+            exit 1
+          fi
+          echo "== main binary entitlements OK =="
+          # helper: no-sandbox + persona-mgmt → posix_spawn 即 root（兜底用）
+          if [ -f "$APP/PsyduckHelper" ]; then
+            ldid -Sent_helper.plist "$APP/PsyduckHelper"
+            ldid -e "$APP/PsyduckHelper" | grep -q "no-sandbox" || { echo "FATAL: helper entitlements missing"; exit 1; }
+            echo "== helper entitlements OK =="
+          else
+            echo "WARN: helper missing"
+          fi
           # 嵌入的 NodeMobile 动态库也要 fake-sign
           if [ -d "$APP/Frameworks" ]; then
             find "$APP/Frameworks" -type f \( -name "*.dylib" -o -perm +111 \) | while read -r f; do ldid -S "$f" || true; done
