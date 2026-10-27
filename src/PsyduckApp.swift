@@ -122,8 +122,8 @@ struct ContentView: View {
             }
             if ck.isEmpty {
                 DispatchQueue.main.async {
-                    cookieStatus = "cookie: helper失败-请手动粘贴"
-                    appendLog("[cookie] helper 未取到 → 用「📋 粘贴Cookie」手动灌")
+                    cookieStatus = "cookie: 未取到"
+                    appendLog("[cookie] 未取到 → 点「🔍 扫描京东沙盒」看详情")
                     running = false
                 }
                 return
