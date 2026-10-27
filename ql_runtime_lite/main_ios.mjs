@@ -161,5 +161,16 @@ setInterval(() => {
     } catch (e) {}
 }, 400)
 
+// 诊断: 验证 profile.js 加载链 (授权 token 的来源)
+;(async () => {
+    try {
+        const prof = await import(pathToFileURL(path.join(ROOT, 'config/profile.js')).href)
+        const def = prof.default || {}
+        console.log('[payload] profile loaded: keys=[' + Object.keys(def).join(',') + '] enc=[' + Object.keys(def.enc || {}).join(',') + ']')
+    } catch (e) {
+        console.log('[payload] profile load FAIL: ' + ((e && e.message) || e))
+    }
+})()
+
 log('[payload] runtime ready, tasks=' + tasks.length + ', waiting cmd.json…')
 setInterval(() => {}, 1 << 30) // 事件循环常驻
