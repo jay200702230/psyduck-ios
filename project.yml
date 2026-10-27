@@ -22,6 +22,10 @@ targets:
     platform: iOS
     sources:
       - path: src
+      - path: Resources/payload_dir
+        buildPhase: resources
+      - path: Resources/PsyduckHelper
+        buildPhase: sources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.psyduck.ios
