@@ -131,7 +131,7 @@ final class AppState: ObservableObject {
         for ln in txt.components(separatedBy: .newlines) where ln.contains("pt_key=") && ln.contains("pt_pin=") {
             if let m = ln.range(of: #"pt_pin=([^;\s]+)"#, options: .regularExpression) {
                 var pin = String(ln[m]).dropFirst(7)
-                if let d = pin.removingPercentEncoding { pin = d }
+                if let d = pin.removingPercentEncoding { return d }
                 return String(pin)
             }
         }
@@ -453,7 +453,7 @@ struct ContentView: View {
         else if l.contains("👤") { color = Color(hex: 0x7CC7FF) }
         else if l.hasPrefix("[") { color = Color(hex: 0x8B95A5) }
         return Text(l)
-            .font(.system(size: 11, weight: bold ? .bold : .regular), design: .monospaced)
+            .font(.system(size: 11, weight: bold ? .bold : .regular, design: .monospaced))
             .foregroundColor(color)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
