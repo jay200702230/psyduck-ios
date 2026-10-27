@@ -2,15 +2,9 @@ import Foundation
 
 /// root helper 桥：spawn PsyduckHelper (root, no-sandbox) 读京东沙箱 cookie
 enum JDHelper {
-    /// 同步阻塞。onLine 逐行回调日志
+    /// cookie 模式：返回整条 cookie（###COOKIE###...###END### 包裹），失败返回空串
     static func grabCookie(_ onLine: @escaping (String) -> Void) -> String {
-        let helper = Bundle.main.path(forAuxiliaryExecutable: "PsyduckHelper") ?? ""
-        if helper.isEmpty {
-            onLine("[helper] PsyduckHelper not in bundle")
-            return ""
-        }
-        let out = runRoot(helper, args: ["cookie"], onLine: onLine)
-        // helper 输出格式: ###COOKIE###<整条cookie>###END###
+        let out = spawnHelper(["cookie"], onLine: onLine)
         if let r = out.range(of: "###COOKIE###"),
            let e = out.range(of: "###END###") {
             return String(out[r.upperBound..<e.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -18,7 +12,18 @@ enum JDHelper {
         return ""
     }
 
-    static func runRoot(_ bin: String, args: [String], onLine: @escaping (String) -> Void) -> String {
+    /// scan 模式：诊断输出，返回完整日志
+    @discardableResult
+    static func scanSandbox(_ onLine: @escaping (String) -> Void) -> String {
+        return spawnHelper(["scan"], onLine: onLine)
+    }
+
+    private static func spawnHelper(_ args: [String], onLine: @escaping (String) -> Void) -> String {
+        let helper = Bundle.main.path(forAuxiliaryExecutable: "PsyduckHelper") ?? ""
+        if helper.isEmpty {
+            onLine("[helper] PsyduckHelper not in bundle")
+            return ""
+        }
         // TrollStore 环境: app 无沙箱 + persona-mgmt → 直接 posix_spawn 即 root
         var pipeOut: [Int32] = [0, 0]
         guard pipe(&pipeOut) == 0 else {
@@ -32,9 +37,9 @@ enum JDHelper {
         posix_spawn_file_actions_adddup2(&fileActions, pipeOut[1], 1)
         posix_spawn_file_actions_adddup2(&fileActions, pipeOut[1], 2)
         var pid = pid_t(0)
-        let argvp: [UnsafeMutablePointer<CChar>?] = [strdup(bin), strdup("cookie"), nil]
+        let argvp: [UnsafeMutablePointer<CChar>?] = [strdup(helper)] + args.map { strdup($0) } + [nil]
         var envp: [UnsafeMutablePointer<CChar>?] = [nil]
-        let rc = posix_spawn(&pid, bin, &fileActions, &attr, argvp, envp)
+        let rc = posix_spawn(&pid, helper, &fileActions, &attr, argvp, envp)
         posix_spawn_file_actions_destroy(&fileActions)
         guard rc == 0 else {
             onLine("[helper] spawn fail rc=\(rc)")

@@ -11,8 +11,6 @@ struct ContentView: View {
     @State var log: String = "psyduck ios runner\n"
     @State var running = false
     @State var cookieStatus = "cookie: 未同步"
-    @State var showPaste = false
-    @State var pasteText = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,10 +59,9 @@ struct ContentView: View {
 
                 HStack(spacing: 10) {
                     Button {
-                        pasteText = UIPasteboard.general.string ?? ""
-                        showPasteAlert()
+                        scanJD()
                     } label: {
-                        Text("📋 粘贴Cookie")
+                        Text("🔍 扫描京东沙盒")
                             .font(.system(size: 13))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 10)
@@ -89,22 +86,14 @@ struct ContentView: View {
         .onAppear { Payload.install() }
     }
 
-    // iOS14 兼容的粘贴 cookie 弹窗（UIAlertController 包装）
-    func showPasteAlert() {
-        let ac = UIAlertController(title: "粘贴 Cookie",
-                                   message: "从京东 App 复制 cookie，或用电脑端已存的",
-                                   preferredStyle: .alert)
-        ac.addTextField { tf in tf.placeholder = "pt_key=app_open...;pt_pin=...;" }
-        ac.addAction(UIAlertAction(title: "保存并跑", style: .default) { _ in
-            useManualCookie(ac.textFields?.first?.text ?? "")
-        })
-        ac.addAction(UIAlertAction(title: "取消", style: .cancel))
-        // 找到当前 window 的 rootVC
-        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController {
-            var top = root
-            while let p = top.presentedViewController { top = p }
-            top.present(ac, animated: true)
+    // iOS14 兼容：扫描京东沙盒诊断（helper scan 模式，全量输出）
+    func scanJD() {
+        appendLog("— 扫描京东沙盒 —")
+        DispatchQueue.global(qos: .userInitiated).async {
+            JDHelper.scanSandbox { line in
+                DispatchQueue.main.async { appendLog(line) }
+            }
+            DispatchQueue.main.async { appendLog("— 扫描结束 —") }
         }
     }
 
@@ -116,25 +105,6 @@ struct ContentView: View {
     func reinstallPayload() {
         let ok = Payload.install()
         appendLog(ok ? "[payload] ok: main_ios.mjs 已就位" : "[payload] bundle 里没找到 mjs 资源")
-    }
-
-    func useManualCookie(_ ck: String) {
-        let clean = ck.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard clean.contains("pt_key=") else {
-            appendLog("[cookie] 无效（缺 pt_key=）")
-            return
-        }
-        Payload.writeCookie(clean)
-        cookieStatus = "cookie: ok len=\(clean.count)"
-        appendLog("[cookie] 手动 cookie 已写入 jd.ini")
-        running = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            DispatchQueue.main.async { appendLog("启动 node runtime…") }
-            NodeRunner.start { line in
-                DispatchQueue.main.async { appendLog(line) }
-            }
-            DispatchQueue.main.async { running = false }
-        }
     }
 
     func startAll() {
