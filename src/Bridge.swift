@@ -94,7 +94,7 @@ enum JDHelper {
             guard lstat(p, &st) == 0 else { continue }
             let fmt = st.st_mode & S_IFMT
             if fmt == S_IFDIR {
-                walk(p, depth + 1, verbose: verbose, into: &hits, files: &files, scanned: &scanned, kb: &kb, onLine: onLine)
+                walk(p, depth: depth + 1, verbose: verbose, into: &hits, files: &files, scanned: &scanned, kb: &kb, onLine: onLine)
             } else if fmt == S_IFREG {
                 files += 1
                 let sz = Int(st.st_size)
