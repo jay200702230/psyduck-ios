@@ -24,6 +24,7 @@ targets:
       - path: src
       - path: Resources/payload_dir
         buildPhase: resources
+        type: folder
       - path: Resources/PsyduckHelper
         buildPhase: sources
     settings:

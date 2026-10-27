@@ -103,8 +103,9 @@ struct ContentView: View {
     }
 
     func reinstallPayload() {
-        let ok = Payload.install()
-        appendLog(ok ? "[payload] ok: main_ios.mjs 已就位" : "[payload] bundle 里没找到 mjs 资源")
+        let ok = Payload.install(force: true)
+        let ver = (try? String(contentsOf: Payload.payloadDir.appendingPathComponent(".payload_version"), encoding: .utf8)) ?? "?"
+        appendLog(ok ? "[payload] 重装完成 version=\(ver.trimmingCharacters(in: .whitespacesAndNewlines))" : "[payload] bundle 里没找到 payload_dir 资源")
     }
 
     func startAll() {

@@ -24,15 +24,17 @@ jobs:
           cp -R "$FRAMEWORK" ./NodeMobile.xcframework
           find ./NodeMobile.xcframework -name "node_api_mobile.h" -o -name "*.h" | head -10
 
-      - name: Build payload (ql_runtime lite)
+      - name: Build payload (real runtime from psyduck_app.tar.gz)
         run: |
-          # payload 不打 zip，直接以 payload_dir/ 目录作为 bundle 资源（Swift 运行时整目录拷贝）
+          # 真 runtime: Android 同款 tar 解包 + iOS 入口覆盖 + 版本标记(装机后自动换血用)
           rm -rf payload_dir
           mkdir -p payload_dir
-          if [ -d ql_runtime_lite ]; then
-            cp -R ql_runtime_lite/. payload_dir/
-          fi
-          ls -la payload_dir/
+          tar -xzf runtime/psyduck_app.tar.gz -C payload_dir
+          rm -f payload_dir/cookie/jd.ini   # 不带打包时的旧 cookie
+          cp ql_runtime_lite/main_ios.mjs payload_dir/main_ios.mjs
+          git rev-parse --short HEAD > payload_dir/.payload_version
+          ls payload_dir
+          echo "parse/jd tasks: $(ls payload_dir/parse/jd | grep -c '^jd_.*\.js$')"
 
       - name: Build helper
         run: |

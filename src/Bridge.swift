@@ -260,29 +260,49 @@ enum Payload {
             .appendingPathComponent("payload")
     }
 
-    /// 安装 payload（与 cookie 无关，app 启动即装）
+    /// bundle 里的整目录资源（folder reference, 结构同 Android rt tar）
+    static var bundlePayloadDir: URL {
+        Bundle.main.bundleURL.appendingPathComponent("payload_dir")
+    }
+
+    /// 安装/换血 payload：版本标记不一致自动整包替换, cookie 目录保留
     @discardableResult
-    static func install() -> Bool {
+    static func install(force: Bool = false) -> Bool {
         let fm = FileManager.default
+        let src = bundlePayloadDir
+        guard fm.fileExists(atPath: src.path) else { return false }
         let dst = payloadDir
         let entry = dst.appendingPathComponent("main_ios.mjs").path
-        guard !fm.fileExists(atPath: entry) else { return true } // 已装
+
+        let bVer = (try? String(contentsOf: src.appendingPathComponent(".payload_version"), encoding: .utf8)) ?? ""
+        let iVer = (try? String(contentsOf: dst.appendingPathComponent(".payload_version"), encoding: .utf8)) ?? ""
+        guard force || bVer != iVer || !fm.fileExists(atPath: entry) else { return true }
+
+        // 保留 cookie 目录（换血不丢登录态）
+        let cookieSrc = dst.appendingPathComponent("cookie")
+        let cookieTmp = fm.temporaryDirectory.appendingPathComponent("ck_\(Int(Date().timeIntervalSince1970))")
+        var hadCookie = false
+        if fm.fileExists(atPath: cookieSrc.path) {
+            try? fm.copyItem(at: cookieSrc, to: cookieTmp)
+            hadCookie = fm.fileExists(atPath: cookieTmp.path)
+        }
+
+        if fm.fileExists(atPath: dst.path) { try? fm.removeItem(at: dst) }
         try? fm.createDirectory(at: dst, withIntermediateDirectories: true)
-        var ok = false
-        // bundle 内 mjs 资源被平铺到 app 根 → 收拢
-        if let files = try? fm.contentsOfDirectory(atPath: Bundle.main.bundlePath) {
-            for f in files where f.hasSuffix(".mjs") {
-                let s = Bundle.main.bundlePath + "/" + f
+
+        var ok = true
+        if let items = try? fm.contentsOfDirectory(atPath: src.path) {
+            for f in items {
                 do {
-                    if fm.fileExists(atPath: dst.appendingPathComponent(f).path) {
-                        try? fm.removeItem(at: dst.appendingPathComponent(f))
-                    }
-                    try fm.copyItem(atPath: s, toPath: dst.appendingPathComponent(f).path)
-                    ok = true
-                } catch {
-                    ok = false
-                }
+                    try fm.copyItem(at: src.appendingPathComponent(f), to: dst.appendingPathComponent(f))
+                } catch { ok = false }
             }
+        } else { ok = false }
+
+        if hadCookie {
+            let back = dst.appendingPathComponent("cookie")
+            if fm.fileExists(atPath: back.path) { try? fm.removeItem(at: back) }
+            try? fm.moveItem(at: cookieTmp, to: back)
         }
         return ok
     }
@@ -300,11 +320,14 @@ enum Payload {
 /// nodejs-mobile 启动器
 enum NodeRunner {
     static func start(_ onLine: @escaping (String) -> Void) {
-        let entry = Payload.payloadDir.appendingPathComponent("main_ios.mjs").path
+        let root = Payload.payloadDir
+        let entry = root.appendingPathComponent("main_ios.mjs").path
         guard FileManager.default.fileExists(atPath: entry) else {
             onLine("[node] entry missing: main_ios.mjs（payload 未安装）")
             return
         }
+        // 脚本大量使用相对路径 (config/config.ini, parse/jd/...) → chdir 到 payload 根
+        FileManager.default.changeCurrentDirectoryPath(root.path)
         onLine("[node] starting: \(entry)")
         let args = ["node", entry]
         NodeMobileBridge.startNode(args: args, onLine: onLine)
