@@ -1,5 +1,4 @@
 import SwiftUI
-import NodeMobile
 
 @main
 struct PsyduckApp: App {
@@ -30,7 +29,7 @@ struct ContentView: View {
                     start()
                 }
                 .disabled(running)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
             }
             .padding(.bottom, 20)
         }

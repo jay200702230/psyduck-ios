@@ -26,12 +26,13 @@ jobs:
 
       - name: Build payload (ql_runtime lite)
         run: |
-          mkdir -p payload_stage
+          # payload 不打 zip，直接以 payload_dir/ 目录作为 bundle 资源（Swift 运行时整目录拷贝）
+          rm -rf payload_dir
+          mkdir -p payload_dir
           if [ -d ql_runtime_lite ]; then
-            cp -R ql_runtime_lite/. payload_stage/
+            cp -R ql_runtime_lite/. payload_dir/
           fi
-          cd payload_stage && zip -qr ../payload.zip . && cd ..
-          ls -la payload.zip
+          ls -la payload_dir/
 
       - name: Build helper
         run: |
@@ -43,9 +44,9 @@ jobs:
 
       - name: Stage app sources
         run: |
-          # xcodegen 需要的所有文件放平到根目录布局
+          # payload_dir 目录资源 + helper 二进制
           mkdir -p Resources
-          cp payload.zip Resources/payload.zip
+          cp -R payload_dir Resources/payload_dir
           cp PsyduckHelper Resources/PsyduckHelper
 
       - name: Generate Xcode project

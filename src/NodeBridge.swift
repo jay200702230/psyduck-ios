@@ -1,23 +1,17 @@
 import Foundation
-import NodeMobile
 
-/// nodejs-mobile 官方 Swift 桥（node_start）
-@objc public class NodeMobileBridge: NSObject {
-    @objc public static func startNode(args: [String], onLine: @escaping (String) -> Void) {
-        // 重定向 stdout 到管道，起读线程喂 onLine
+/// nodejs-mobile 启动桥（node_start C API）
+enum NodeMobileBridge {
+    static func startNode(args: [String], onLine: @escaping (String) -> Void) {
         setvbuf(stdout, nil, _IOLBF, 8192)
-        // nodejs-mobile: NodeMM.startEngine(withArguments:) 官方 API
-        let cargs = args.map { strdup($0) } + [nil]
-        var argv = cargs.compactMap { $0 }
-        // NodeMM API 名以 framework 实际 header 为准；标准用法：
-        // node_start(argc, argv)  (node_api_mobile.h)
         DispatchQueue.global(qos: .default).async {
-            // libnode dylib 直接调 node_start
-            let argc = Int32(argv.count)
-            argv.withUnsafeMutableBufferPointer { buf in
-                var ptr = buf.baseAddress
-                node_start(argc, &ptr)
-            }
+            // 构造 char** argv（node_start 签名: int node_start(int, char**)
+            var cargs: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0)! }
+            cargs.append(nil)
+            var argv = UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>.allocate(capacity: cargs.count)
+            for (i, p) in cargs.enumerated() { argv[i] = p }
+            let argc = Int32(args.count)
+            node_start(argc, argv)
             onLine("[node] exited")
         }
     }

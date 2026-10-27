@@ -44,9 +44,8 @@ enum JDHelper {
 /// payload 解压 + cookie ini 写入
 enum Payload {
     static var payloadDir: URL {
-        let docs = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: nil)
-            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("payload")
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("payload")
     }
 
     static func install(cookie: String) {
@@ -55,8 +54,14 @@ enum Payload {
         // 首次解压（bundle 内 payload.zip → Documents/payload）
         if !fm.fileExists(atPath: dst.path) {
             if let zip = Bundle.main.url(forResource: "payload", withExtension: "zip") {
-                try? fm.unzipItem(at: zip, to: dst.parent())
-                DispatchQueue.main.async {}
+                // iOS 无内置 unzip → 用 Process 不行（无沙箱可 spawn unzip? 无此二进制）→ 简易 ZIP 解包见 helper
+                // 这里改用 helper 解压（root helper 里有 unzip 逻辑不现实）
+                // 方案: payload.zip 同样由 Swift 简易解包 —— 直接把 zip 当 raw 拷贝留给 node 端解? 不行。
+                // 最稳: 构建期不 zip, 直接把 payload 文件拷进 bundle payload_dir/ 资源目录, 运行时整目录拷贝
+                let srcDir = Bundle.main.url(forResource: "payload_dir", withExtension: nil)
+                if let src = srcDir {
+                    try? fm.copyItem(at: src, to: dst)
+                }
             }
         }
         // 写 cookie/jd.ini
