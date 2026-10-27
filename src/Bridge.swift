@@ -253,6 +253,71 @@ enum JDHelper {
     }
 }
 
+/// 任务运行控制: cmd.json 指令 + 任务注册表 (config/jd.ini)
+enum RunnerCtl {
+    struct Task {
+        let alias: String
+        let title: String
+    }
+
+    static var cmdURL: URL { Payload.payloadDir.appendingPathComponent("cmd.json") }
+
+    /// 发指令给 node 指令服务器 (main_ios.mjs 轮询)
+    static func send(_ op: String, index: Int? = nil) {
+        var d: [String: Any] = ["op": op]
+        if let i = index { d["index"] = i }
+        guard let data = try? JSONSerialization.data(withJSONObject: d) else { return }
+        try? data.write(to: cmdURL)
+    }
+
+    /// config/jd.ini [alias] + title=/map= → 任务列表 (对齐 Android Runner.listTasks)
+    static func listTasks() -> [Task] {
+        let p = Payload.payloadDir.appendingPathComponent("config/jd.ini").path
+        guard let txt = try? String(contentsOfFile: p, encoding: .utf8) else { return [] }
+        var out: [Task] = []
+        var alias = ""
+        var title = ""
+        var map = ""
+        func flush() {
+            if !alias.isEmpty { out.append(Task(alias: alias, title: displayTitle(alias, title: title, map: map))) }
+        }
+        for raw in txt.components(separatedBy: .newlines) {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix("[") && l.hasSuffix("]") && !l.hasPrefix("[#") {
+                flush()
+                alias = String(l.dropFirst().dropLast())
+                title = ""
+                map = ""
+            } else if l.hasPrefix("title=") {
+                title = String(l.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+            } else if l.hasPrefix("map=") {
+                map = String(l.dropFirst(4)).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// 对齐 Android resolveTitle: ini title → map 脚本 title → alias 脚本 title → alias
+    private static func displayTitle(_ alias: String, title: String, map: String) -> String {
+        if !title.isEmpty { return title }
+        if !map.isEmpty, let t = titleFromScript(map + ".js") { return t }
+        if let t = titleFromScript(alias + ".js") { return t }
+        return alias
+    }
+
+    /// 对齐 Android P_TITLE: title\s*:\s*['"`]([^'"`\r\n]+)['"`]
+    private static func titleFromScript(_ name: String) -> String? {
+        let p = Payload.payloadDir.appendingPathComponent("parse/jd/" + name).path
+        guard let head = try? String(contentsOfFile: p, encoding: .utf8) else { return nil }
+        guard let m = head.range(of: #"title\s*:\s*['"`]([^'"`\r\n]+)['"`]"#, options: .regularExpression) else { return nil }
+        var t = String(head[m])
+        t = t.replacingOccurrences(of: #"^title\s*:\s*"#, with: "", options: .regularExpression)
+        t = t.trimmingCharacters(in: CharacterSet(charactersIn: "'\"` \t"))
+        return t.isEmpty ? nil : t
+    }
+}
+
 /// payload 拷贝 + cookie ini 写入
 enum Payload {
     static var payloadDir: URL {

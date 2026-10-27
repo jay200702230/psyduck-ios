@@ -1,138 +1,147 @@
-// iOS payload 入口: 读 cookie/jd.ini → 按 panel.json 过滤 parse/jd/ → 逐个跑全部任务
-// 对齐 Android main.js 的单跑逻辑(import parse/jd/<name>.js → new Main() → init({filename}))
+// iOS payload 指令服务器: node_start 只能调一次 → 常驻, 轮询 cmd.json 执行任务
+// cmd.json: {op:"runAll"|"runFrom"|"single"|"assets"|"stop", index?}
+// UI 同步: [ui] begin / [ui] end / [ui] status:xxx 行给 Swift 状态卡消费
 import fs from 'fs'
 import path from 'path'
-import https from 'https'
 import {fileURLToPath, pathToFileURL} from 'url'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
+const CMD = path.join(ROOT, 'cmd.json')
 
-function loadCookie() {
+function log(s) { console.log(s) }
+function ui(s) { console.log('[ui] ' + s) }
+
+// 任务注册表: config/jd.ini [alias] + title= + map= (对齐 Android Runner.listTasks)
+function loadTasks() {
+    const out = []
+    let cur = null
     try {
-        const txt = fs.readFileSync(path.join(ROOT, 'cookie/jd.ini'), 'utf8')
-        for (const ln of txt.split(/\r?\n/)) {
-            if (ln.includes('pt_key=') && ln.includes('pt_pin=')) return ln.trim()
+        const txt = fs.readFileSync(path.join(ROOT, 'config/jd.ini'), 'utf8')
+        for (let ln of txt.split(/\r?\n/)) {
+            ln = ln.trim()
+            const m = ln.match(/^\[(.+)\]$/)
+            if (m && !ln.startsWith('[#')) {
+                if (cur) out.push(cur)
+                cur = {alias: m[1], title: '', map: ''}
+            } else if (cur) {
+                if (ln.startsWith('title=')) cur.title = ln.slice(6).trim()
+                else if (ln.startsWith('map=')) cur.map = ln.slice(4).trim()
+            }
+        }
+        if (cur) out.push(cur)
+    } catch (e) {}
+    return out
+}
+const titleOf = t => t.title || t.map || t.alias
+
+// 清某脚本的去重缓存 (对齐 Android clearTaskCache): 1 小时内跑过会被「已有记录,跳过运行」拦住
+function clearTaskCache(alias) {
+    let n = 0
+    try {
+        const dir = path.join(ROOT, 'temp')
+        for (const f of fs.readdirSync(dir)) {
+            if (f.includes(alias)) { try { fs.rmSync(path.join(dir, f), {recursive: true, force: true}); n++ } catch (e) {} }
         }
     } catch (e) {}
-    return ''
+    if (n > 0) log('[payload] 已清 ' + alias + ' 缓存 ' + n + ' 项')
 }
 
-function ckInfo(ck) {
-    const pin = (ck.match(/pt_pin=([^;\s]+)/) || [])[1] || '?'
-    const keyTail = ((ck.match(/pt_key=([^;\s]+)/) || [])[1] || '').slice(-6)
-    return {pin, keyTail}
-}
-
-// 咨询性登录态校验: 失败不拦截, 只提示
-function ckIslogin(cookie) {
-    return new Promise(resolve => {
-        const req = https.request({
-            hostname: 'plogin.m.jd.com', path: '/cgi-bin/ml/islogin', method: 'GET',
-            headers: {Cookie: cookie, 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'}
-        }, res => {
-            let b = ''
-            res.on('data', d => b += d)
-            res.on('end', () => {
-                try { resolve(JSON.parse(b).islogin == '1' ? 1 : 0) } catch (e) { resolve(-1) }
-            })
-        })
-        req.on('error', () => resolve(-1))
-        req.setTimeout(8000, () => { req.destroy(); resolve(-1) })
-        req.end()
-    })
-}
-
-// 任务注册表: panel.json delete=物理删除(过期) remove=不进列表
-function taskFilter() {
-    let del = [], rm = []
+async function runOne(alias) {
+    const type = alias.match(/(^[A-Za-z0-9]+)_/)[1]
+    const params = {filename: alias}
     try {
-        const p = JSON.parse(fs.readFileSync(path.join(ROOT, 'config/panel.json'), 'utf8'))
-        del = (p.script && p.script.jd && p.script.jd.delete) || []
-        rm = (p.script && p.script.jd && p.script.jd.remove) || []
-    } catch (e) {}
-    for (const f of del) {
-        try { fs.unlinkSync(path.join(ROOT, 'parse/jd', f)); console.log('[payload] deleted(过期):', f) } catch (e) {}
-    }
-    return new Set(rm)
-}
-
-async function runOne(filename) {
-    const type = filename.match(/(^[A-Za-z0-9]+)_/)[1]
-    const params = {filename}
-    try {
-        const jsPath = pathToFileURL(path.join(ROOT, 'parse', type, filename + '.js')).href
+        const jsPath = pathToFileURL(path.join(ROOT, 'parse', type, alias + '.js')).href
         const psyDuck = await import(jsPath)
         if (!psyDuck.Main) {
-            console.log(`[payload] ${filename}: no Main export, skip`)
+            log('[payload] ' + alias + ': no Main export, skip')
             return false
         }
         const t0 = Date.now()
-        const main = new psyDuck.Main()
-        await main.init(params)
-        console.log(`[payload] ${filename} done in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
+        await new psyDuck.Main().init(params)
+        log('[payload] ' + alias + ' done in ' + ((Date.now() - t0) / 1000).toFixed(1) + 's')
         return true
     } catch (e) {
         // config.ini 映射 fallback (照抄 main.js)
         try {
             const ini = (await import('ini')).default
-            const iniText = fs.readFileSync(path.join(ROOT, 'config/config.ini'), 'UTF-8')
-            const config = ini.parse(iniText)
+            const config = ini.parse(fs.readFileSync(path.join(ROOT, 'config/config.ini'), 'UTF-8'))
             let iniPath = path.join(ROOT, 'config', type + '.ini')
             if (config.env && config.env.iniPath) iniPath = path.join(ROOT, config.env.iniPath, type + '.ini')
-            const scText = fs.readFileSync(iniPath, 'UTF-8')
-            const script = ini.parse(scText)
+            const script = ini.parse(fs.readFileSync(iniPath, 'UTF-8'))
             let map = ''
             for (const i in script) {
-                if (i == filename && script[i].map) map = script[i].map
+                if (i == alias && script[i].map) map = script[i].map
             }
             if (map) {
                 params.mapping = map
                 const jsPath = pathToFileURL(path.join(ROOT, 'parse', type, map + '.js')).href
-                const psyDuck = await import(jsPath)
                 await new psyDuck.Main().init(params)
-                console.log(`[payload] ${filename}(map→${map}) done`)
+                log('[payload] ' + alias + '(map→' + map + ') done')
                 return true
             }
         } catch (e2) {}
-        console.log(`[payload] ${filename} fail: ${(e && e.message) || e}`)
+        log('[payload] ' + alias + ' fail: ' + ((e && e.message) || e))
         return false
     }
 }
 
-async function main() {
-    const ck = loadCookie()
-    if (!ck) {
-        console.log('[payload] cookie/jd.ini 无 cookie — 先在 app 里点同步')
-        return
-    }
-    const {pin, keyTail} = ckInfo(ck)
-    console.log(`[payload] account: ${pin} (pt_key…${keyTail})`)
-    const st = await ckIslogin(ck)
-    if (st === 0) console.log('[payload] WARN: islogin=0 cookie疑似过期, 仍继续尝试')
-    else if (st === -1) console.log('[payload] WARN: islogin 校验失败(网络?), 继续')
+let stopReq = false
+let running = false
+let tasks = loadTasks()
 
-    const skip = taskFilter()
-    let tasks = []
-    try {
-        tasks = fs.readdirSync(path.join(ROOT, 'parse/jd'))
-            .filter(f => /^jd_.+\.js$/.test(f))
-            .filter(f => !f.endsWith('_sdk.js') && f !== 'jd_signer_node.mjs')
-            .filter(f => !skip.has(f))
-            .sort()
-    } catch (e) {}
-    console.log(`[payload] tasks: ${tasks.length}`)
-    if (!tasks.length) {
-        console.log('[payload] parse/jd 无任务脚本')
-        return
+async function runSeq(start, end, label) {
+    tasks = loadTasks()
+    running = true
+    ui('begin')
+    log('[payload] ' + label + ': 第 ' + (start + 1) + ' ~ ' + end + ' 项 (共 ' + (end - start) + ' 个)')
+    for (let i = start; i < end; i++) {
+        if (stopReq) { log('[payload] ⏹ 手动停止, 剩余任务不再执行'); break }
+        const t = tasks[i]
+        ui('status:执行任务 ' + (i + 1) + '/' + tasks.length + ': ' + titleOf(t))
+        log('[payload] ▶ ' + (i + 1) + '. ' + titleOf(t))
+        clearTaskCache(t.alias)
+        await runOne(t.alias)
     }
-    let ok = 0
-    for (const f of tasks) {
-        console.log(`\n[payload] === ${f} ===`)
-        if (await runOne(f.replace(/\.js$/, ''))) ok++
-    }
-    console.log(`\n[payload] all done: ${ok}/${tasks.length}`)
-    // 保持 node 事件循环存活(node_start 不返回, 不重复触发)
-    setInterval(() => {}, 1 << 30)
+    ui('end')
+    ui('status:' + label + '完成')
+    running = false
 }
 
-main()
+async function runAssets() {
+    running = true
+    ui('begin')
+    ui('assets-begin')
+    clearTaskCache('jd_task_assets')
+    await runOne('jd_task_assets')
+    ui('assets-end')
+    ui('end')
+    running = false
+}
+
+function handle(c) {
+    if (c.op === 'stop') {
+        if (running) { stopReq = true; ui('status:⏹ 停止请求已接收, 当前任务跑完即停') }
+        else log('[payload] 当前没有正在跑的任务')
+        return
+    }
+    if (running) { log('[payload] 已有任务在跑, 忽略 ' + c.op); return }
+    stopReq = false
+    tasks = loadTasks()
+    if (c.op === 'runAll') runSeq(0, tasks.length, '跑全部任务')
+    else if (c.op === 'runFrom') runSeq(Math.max(0, Math.min(c.index | 0, tasks.length - 1)), tasks.length, '单跑到最后')
+    else if (c.op === 'single') { const i = Math.max(0, Math.min(c.index | 0, tasks.length - 1)); runSeq(i, i + 1, '单跑') }
+    else if (c.op === 'assets') runAssets()
+    else log('[payload] 未知指令: ' + c.op)
+}
+
+// 指令轮询
+setInterval(() => {
+    try {
+        const txt = fs.readFileSync(CMD, 'utf8')
+        fs.unlinkSync(CMD)
+        handle(JSON.parse(txt))
+    } catch (e) {}
+}, 400)
+
+log('[payload] runtime ready, tasks=' + tasks.length + ', waiting cmd.json…')
+setInterval(() => {}, 1 << 30) // 事件循环常驻

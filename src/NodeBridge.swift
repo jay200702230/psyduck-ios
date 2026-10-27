@@ -2,7 +2,8 @@ import Foundation
 
 /// nodejs-mobile 启动桥 — dlsym 取 node_start + stdout/stderr 重定向到日志 UI
 enum NodeMobileBridge {
-    private static var started = false
+    /// node_start 一进程只能调一次; UI 据此判断是否已启动
+    static private(set) var started = false
 
     static func startNode(args: [String], onLine: @escaping (String) -> Void) {
         if started {
