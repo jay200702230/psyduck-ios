@@ -403,7 +403,8 @@ enum NodeRunner {
         try? FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
         setenv("TMPDIR", tmpDir, 1)
         onLine("[node] starting: \(entry)")
-        let args = ["node", entry]
+        // --no-jitless: nodejs-mobile 默认 jitless 禁了 WASM; TrollStore JIT entitlements 允许真 JIT
+        let args = ["node", "--no-jitless", "--expose-wasm", entry]
         NodeMobileBridge.startNode(args: args, onLine: onLine)
     }
 }
