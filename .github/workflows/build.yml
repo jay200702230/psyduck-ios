@@ -31,9 +31,12 @@ jobs:
           mkdir -p payload_dir
           tar -xzf runtime/psyduck_app.tar.gz -C payload_dir
           rm -f payload_dir/cookie/jd.ini   # 不带打包时的旧 cookie
-          # 权威任务注册表 + a2 签名模块 (对齐 Android initRuntime 的覆盖行为)
+          # 权威任务注册表 + a2 签名模块 + 用户 wskey 种子 (对齐 Android initRuntime 的覆盖行为)
           cp runtime/assets_jd.ini payload_dir/config/jd.ini
           cp runtime/a2local.mjs payload_dir/a2local.mjs
+          cp runtime/jdUser.ini payload_dir/config/jdUser.ini
+          # 安卓硬编码路径修补 (/data/data/... -> process.cwd())
+          python3 runtime/patch_paths.py payload_dir
           cp ql_runtime_lite/main_ios.mjs payload_dir/main_ios.mjs
           git rev-parse --short HEAD > payload_dir/.payload_version
           ls payload_dir

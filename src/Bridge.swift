@@ -343,13 +343,16 @@ enum Payload {
         let iVer = (try? String(contentsOf: dst.appendingPathComponent(".payload_version"), encoding: .utf8)) ?? ""
         guard force || bVer != iVer || !fm.fileExists(atPath: entry) else { return true }
 
-        // 保留 cookie 目录（换血不丢登录态）
-        let cookieSrc = dst.appendingPathComponent("cookie")
-        let cookieTmp = fm.temporaryDirectory.appendingPathComponent("ck_\(Int(Date().timeIntervalSince1970))")
-        var hadCookie = false
-        if fm.fileExists(atPath: cookieSrc.path) {
-            try? fm.copyItem(at: cookieSrc, to: cookieTmp)
-            hadCookie = fm.fileExists(atPath: cookieTmp.path)
+        // 保留 cookie 目录 + jdUser.ini (wskey 授权数据, 换血不丢登录态)
+        let keep: [(URL, String)] = [
+            (dst.appendingPathComponent("cookie"), "cookie"),
+            (dst.appendingPathComponent("config/jdUser.ini"), "jdUser.ini"),
+        ]
+        var saved: [(URL, String)] = []
+        for (src, tag) in keep where FileManager.default.fileExists(atPath: src.path) {
+            let tmp = fm.temporaryDirectory.appendingPathComponent("keep_\(tag)_\(Int(Date().timeIntervalSince1970))")
+            try? fm.copyItem(at: src, to: tmp)
+            if fm.fileExists(atPath: tmp.path) { saved.append((tmp, tag)) }
         }
 
         if fm.fileExists(atPath: dst.path) { try? fm.removeItem(at: dst) }
@@ -364,10 +367,11 @@ enum Payload {
             }
         } else { ok = false }
 
-        if hadCookie {
-            let back = dst.appendingPathComponent("cookie")
+        for (tmp, tag) in saved {
+            let back = dst.appendingPathComponent(tag == "cookie" ? "cookie" : "config/jdUser.ini")
             if fm.fileExists(atPath: back.path) { try? fm.removeItem(at: back) }
-            try? fm.moveItem(at: cookieTmp, to: back)
+            try? fm.createDirectory(at: back.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? fm.moveItem(at: tmp, to: back)
         }
         return ok
     }
@@ -393,6 +397,11 @@ enum NodeRunner {
         }
         // 脚本大量使用相对路径 (config/config.ini, parse/jd/...) → chdir 到 payload 根
         FileManager.default.changeCurrentDirectoryPath(root.path)
+        // 对齐 Android Runner 的 export: HOME/TMPDIR 指向 runtime (脚本 curlBin/tmpDir 用)
+        setenv("HOME", root.path, 1)
+        let tmpDir = root.appendingPathComponent("tmp").path
+        try? FileManager.default.createDirectory(atPath: tmpDir, withIntermediateDirectories: true)
+        setenv("TMPDIR", tmpDir, 1)
         onLine("[node] starting: \(entry)")
         let args = ["node", entry]
         NodeMobileBridge.startNode(args: args, onLine: onLine)
