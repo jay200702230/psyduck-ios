@@ -70,10 +70,15 @@ enum Payload {
     static func install(cookie: String) {
         let fm = FileManager.default
         let dst = payloadDir
-        // 首次安装（bundle 内 payload_dir → Documents/payload）
+        // 首次安装（bundle 内 mjs 资源被平铺 → 从 bundle 根收拢到 Documents/payload）
         if !fm.fileExists(atPath: dst.path) {
-            if let src = Bundle.main.url(forResource: "payload_dir", withExtension: nil) {
-                try? fm.copyItem(at: src, to: dst)
+            try? fm.createDirectory(at: dst, withIntermediateDirectories: true)
+            // 收拢平铺的 mjs 资源
+            if let files = try? fm.contentsOfDirectory(atPath: Bundle.main.bundlePath) {
+                for f in files where f.hasSuffix(".mjs") {
+                    let s = Bundle.main.bundlePath + "/" + f
+                    try? fm.copyItem(atPath: s, toPath: dst.appendingPathComponent(f).path)
+                }
             }
         }
         // 写 cookie/jd.ini
