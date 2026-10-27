@@ -461,7 +461,7 @@ struct ContentView: View {
     // MARK: 工具
 
     /// Android 权重行 (1.4:1)
-    func propRow<V0: View, V1: View>(_ ratio: CGFloat, @ViewBuilder _ content: () -> TupleView<(V0, V1)>) -> some View {
+    func propRow<V0: View, V1: View>(_ ratio: CGFloat, @ViewBuilder _ content: @escaping () -> TupleView<(V0, V1)>) -> some View {
         GeometryReader { g in
             let w = (g.size.width - 8) * ratio
             HStack(spacing: 8) {
