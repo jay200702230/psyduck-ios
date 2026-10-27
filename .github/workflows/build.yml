@@ -1,0 +1,80 @@
+name: Build psyduck-ios ipa (TrollStore)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Download nodejs-mobile iOS runtime
+        run: |
+          curl -L -o nvm.zip https://github.com/nodejs-mobile/nodejs-mobile/releases/download/v18.20.4/nodejs-mobile-v18.20.4-ios.zip
+          unzip -q nvm.zip -d nvm
+          # 找出 NodeMobile.xcframework
+          find nvm -maxdepth 3 -type d -name "*.xcframework" || true
+          FRAMEWORK=$(find nvm -maxdepth 4 -type d -name "NodeMobile.xcframework" | head -1)
+          echo "framework at: $FRAMEWORK"
+          mkdir -p app
+          cp -R "$FRAMEWORK" app/NodeMobile.xcframework
+
+      - name: Build payload (ql_runtime lite)
+        run: |
+          mkdir -p payload_stage
+          if [ -d ql_runtime_lite ]; then
+            cp -R ql_runtime_lite/. payload_stage/
+          else
+            echo "console.log('psyduck ios payload placeholder')" > payload_stage/main_ios.mjs
+          fi
+          cd payload_stage && zip -qr ../app/payload.zip . && cd ..
+          ls -la app/payload.zip
+
+      - name: Build helper
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 \
+            -miphoneos-version-min=14.0 \
+            -o app/PsyduckHelper helper/PsyduckHelper.m \
+            -framework Foundation
+          file app/PsyduckHelper
+
+      - name: Generate Xcode project
+        run: |
+          cd app
+          # 解 payload.zip 成 Resources 引用
+          mkdir -p src/Resources
+          cp payload.zip src/Resources/payload.zip
+          cd ..
+          xcodegen generate --spec project.yml
+
+      - name: Build unsigned app
+        run: |
+          xcodebuild -project app/Psyduck.xcodeproj \
+            -scheme Psyduck -configuration Release -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build 2>&1 | tail -30
+
+      - name: Package ipa
+        run: |
+          APP=$(find build -type d -name "Psyduck.app" | head -1)
+          # fake-sign 所有二进制（TrollStore 要求 ldid fake-sign）
+          brew install ldid
+          ldid -S "$APP/Psyduck"
+          ldid -S "$APP/PsyduckHelper"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry psyduck-ios.ipa Payload
+          ls -la psyduck-ios.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: psyduck-ios
+          path: psyduck-ios.ipa
