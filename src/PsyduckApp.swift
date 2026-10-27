@@ -62,7 +62,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Button {
                         pasteText = UIPasteboard.general.string ?? ""
-                        showPaste = true
+                        showPasteAlert()
                     } label: {
                         Text("📋 粘贴Cookie")
                             .font(.system(size: 13))
@@ -87,12 +87,24 @@ struct ContentView: View {
             .padding(.vertical, 10)
         }
         .onAppear { Payload.install() }
-        .alert("粘贴 Cookie", isPresented: $showPaste) {
-            TextField("pt_key=app_open...;pt_pin=...;", text: $pasteText)
-            Button("保存并跑") { useManualCookie(pasteText) }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("从京东 App 复制 cookie，或用电脑端已存的")
+    }
+
+    // iOS14 兼容的粘贴 cookie 弹窗（UIAlertController 包装）
+    func showPasteAlert() {
+        let ac = UIAlertController(title: "粘贴 Cookie",
+                                   message: "从京东 App 复制 cookie，或用电脑端已存的",
+                                   preferredStyle: .alert)
+        ac.addTextField { tf in tf.placeholder = "pt_key=app_open...;pt_pin=...;" }
+        ac.addAction(UIAlertAction(title: "保存并跑", style: .default) { _ in
+            useManualCookie(ac.textFields?.first?.text ?? "")
+        })
+        ac.addAction(UIAlertAction(title: "取消", style: .cancel))
+        // 找到当前 window 的 rootVC
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController {
+            var top = root
+            while let p = top.presentedViewController { top = p }
+            top.present(ac, animated: true)
         }
     }
 
