@@ -11,6 +11,14 @@ const CMD = path.join(ROOT, 'cmd.json')
 function log(s) { console.log(s) }
 function ui(s) { console.log('[ui] ' + s) }
 
+// ===== 嵌入环境保命 =====
+// nodejs-mobile 里任何 uncaughtException/process.exit 都会 exit 整个 app 进程 = 闪退。
+// psyduck 框架用 throw 'End' 当正常收尾, 且大量在定时器回调里抛 → 必须全局兜底。
+process.on('uncaughtException', e => log('[payload] uncaught: ' + ((e && e.message) || e)))
+process.on('unhandledRejection', e => log('[payload] unhandledRejection: ' + ((e && e.message) || e)))
+process.exit = (code = 0) => { log('[payload] process.exit(' + code + ') intercepted') }
+process.reallyExit = () => {}
+
 // 任务注册表: config/jd.ini [alias] + title= + map= (对齐 Android Runner.listTasks)
 function loadTasks() {
     const out = []
@@ -50,17 +58,24 @@ async function runOne(alias) {
     const type = alias.match(/(^[A-Za-z0-9]+)_/)[1]
     const params = {filename: alias}
     try {
+        log('[payload] import ' + alias + '…')
+        const t0 = Date.now()
         const jsPath = pathToFileURL(path.join(ROOT, 'parse', type, alias + '.js')).href
         const psyDuck = await import(jsPath)
         if (!psyDuck.Main) {
             log('[payload] ' + alias + ': no Main export, skip')
             return false
         }
-        const t0 = Date.now()
+        log('[payload] imported in ' + (Date.now() - t0) + 'ms, init…')
         await new psyDuck.Main().init(params)
         log('[payload] ' + alias + ' done in ' + ((Date.now() - t0) / 1000).toFixed(1) + 's')
         return true
     } catch (e) {
+        // 框架约定: throw 'End' = 正常结束
+        if (e === 'End' || (e && e.message === 'End')) {
+            log('[payload] ' + alias + ' End')
+            return true
+        }
         // config.ini 映射 fallback (照抄 main.js)
         try {
             const ini = (await import('ini')).default
@@ -75,11 +90,14 @@ async function runOne(alias) {
             if (map) {
                 params.mapping = map
                 const jsPath = pathToFileURL(path.join(ROOT, 'parse', type, map + '.js')).href
-                await new psyDuck.Main().init(params)
+                const mod2 = await import(jsPath)
+                await new mod2.Main().init(params)
                 log('[payload] ' + alias + '(map→' + map + ') done')
                 return true
             }
-        } catch (e2) {}
+        } catch (e2) {
+            if (e2 === 'End' || (e2 && e2.message === 'End')) return true
+        }
         log('[payload] ' + alias + ' fail: ' + ((e && e.message) || e))
         return false
     }
