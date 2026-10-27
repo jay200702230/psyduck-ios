@@ -67,7 +67,10 @@ jobs:
             -scheme Psyduck -configuration Release -sdk iphoneos \
             -derivedDataPath build \
             CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build 2>&1 | tail -40
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build || {
+              xcodebuild -project Psyduck.xcodeproj -scheme Psyduck -configuration Release -sdk iphoneos \
+                -derivedDataPath build CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build 2>&1 | grep -E "error:" ;
+              exit 1; }
 
       - name: Package ipa
         run: |

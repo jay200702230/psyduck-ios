@@ -26,12 +26,17 @@ enum JDHelper {
             onLine("[helper] pipe fail")
             return ""
         }
-        var attr = posix_spawnattr_t()
+        var attr = posix_spawnattr_t(bitPattern: 0)
         posix_spawnattr_init(&attr)
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_adddup2(&fileActions, pipeOut[1], 1)
+        posix_spawn_file_actions_adddup2(&fileActions, pipeOut[1], 2)
         var pid = pid_t(0)
         let argvp: [UnsafeMutablePointer<CChar>?] = [strdup(bin), strdup("cookie"), nil]
         var envp: [UnsafeMutablePointer<CChar>?] = [nil]
-        let rc = posix_spawn(&pid, bin, nil, &attr, argvp, envp)
+        let rc = posix_spawn(&pid, bin, &fileActions, &attr, argvp, envp)
+        posix_spawn_file_actions_destroy(&fileActions)
         guard rc == 0 else {
             onLine("[helper] spawn fail rc=\(rc)")
             return ""
