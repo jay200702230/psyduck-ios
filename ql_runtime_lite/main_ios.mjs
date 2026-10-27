@@ -58,6 +58,29 @@ if (typeof globalThis.Intl === 'undefined') {
 }
 console.log('[payload] runtime globals: WebAssembly=' + typeof WebAssembly + ' Intl=' + typeof Intl)
 
+// ===== 授权 read-once 对抗 =====
+// 框架首次解析 profile.js 后会清空 enc 对象 (防盗拷); Android 每任务独立进程不受影响,
+// iOS 单进程内第 2 个任务起 enc 全空 → Token无效。对策: 开机备份, 每任务前回填。
+let __profMod = null
+let __encBackup = null
+async function rearmProfile() {
+    try {
+        if (!__profMod) {
+            __profMod = await import(pathToFileURL(path.join(ROOT, 'config/profile.js')).href)
+            const def = __profMod.default || {}
+            __encBackup = def.enc ? JSON.parse(JSON.stringify(def.enc)) : null
+            console.log('[payload] profile armed: enc=[' + Object.keys(def.enc || {}).join(',') + ']')
+        }
+        const def = __profMod.default || {}
+        if (__encBackup && Object.keys(def.enc || {}).length === 0) {
+            def.enc = JSON.parse(JSON.stringify(__encBackup))
+            console.log('[payload] profile enc re-armed')
+        }
+    } catch (e) {
+        console.log('[payload] profile re-arm fail: ' + ((e && e.message) || e))
+    }
+}
+
 // 任务注册表: config/jd.ini [alias] + title= + map= (对齐 Android Runner.listTasks)
 function loadTasks() {
     const out = []
@@ -105,7 +128,25 @@ async function runOne(alias) {
             log('[payload] ' + alias + ': no Main export, skip')
             return false
         }
+        // 配置链失败要看得见
+        if (!psyDuck.Main.prototype.__cfgHook) {
+            psyDuck.Main.prototype.__cfgHook = true
+            for (const m of ['initConfiguration', '_parseConfig']) {
+                const orig = psyDuck.Main.prototype[m]
+                if (typeof orig === 'function') {
+                    psyDuck.Main.prototype[m] = async function (...a) {
+                        try {
+                            return await orig.apply(this, a)
+                        } catch (e) {
+                            log('[payload] ' + m + ' FAIL: ' + ((e && e.message) || e))
+                            throw e
+                        }
+                    }
+                }
+            }
+        }
         log('[payload] imported in ' + (Date.now() - t0) + 'ms, init…')
+        await rearmProfile()
         await new psyDuck.Main().init(params)
         log('[payload] ' + alias + ' done in ' + ((Date.now() - t0) / 1000).toFixed(1) + 's')
         return true
@@ -200,15 +241,9 @@ setInterval(() => {
     } catch (e) {}
 }, 400)
 
-// 诊断: 验证 profile.js 加载链 (授权 token 的来源)
+// 诊断: profile.js 加载链 (开机自检一次)
 ;(async () => {
-    try {
-        const prof = await import(pathToFileURL(path.join(ROOT, 'config/profile.js')).href)
-        const def = prof.default || {}
-        console.log('[payload] profile loaded: keys=[' + Object.keys(def).join(',') + '] enc=[' + Object.keys(def.enc || {}).join(',') + ']')
-    } catch (e) {
-        console.log('[payload] profile load FAIL: ' + ((e && e.message) || e))
-    }
+    await rearmProfile()
 })()
 
 log('[payload] runtime ready, tasks=' + tasks.length + ', waiting cmd.json…')
