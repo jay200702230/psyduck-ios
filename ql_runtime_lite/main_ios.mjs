@@ -19,6 +19,45 @@ process.on('unhandledRejection', e => log('[payload] unhandledRejection: ' + ((e
 process.exit = (code = 0) => { log('[payload] process.exit(' + code + ') intercepted') }
 process.reallyExit = () => {}
 
+// ===== Intl polyfill (nodejs-mobile iOS 构建无 ICU, luxon/框架日期格式化必需) =====
+if (typeof globalThis.Intl === 'undefined') {
+    const __pad = (n, w = 2) => String(n).padStart(w, '0')
+    class DateTimeFormat {
+        constructor(locale, opts = {}) { this._opts = opts || {}; this._locale = String(locale || 'en-US') }
+        format(d) {
+            const dt = d instanceof Date ? d : new Date(d)
+            if (isNaN(dt.getTime())) return 'Invalid Date'
+            const Y = dt.getFullYear(), M = __pad(dt.getMonth() + 1), D = __pad(dt.getDate())
+            const h = __pad(dt.getHours()), m = __pad(dt.getMinutes()), s = __pad(dt.getSeconds())
+            const o = this._opts
+            if (o.dateStyle && !o.timeStyle) return `${Y}-${M}-${D}`
+            if (o.timeStyle && !o.dateStyle) return `${h}:${m}:${s}`
+            return `${Y}-${M}-${D} ${h}:${m}:${s}`
+        }
+        formatToParts(d) { return [{ type: 'formatted', value: this.format(d) }] }
+        resolvedOptions() { return { locale: this._locale, timeZone: this._opts.timeZone || 'UTC', ...this._opts } }
+        static supportedLocalesOf(l) { return Array.isArray(l) ? l : [l] }
+    }
+    class NumberFormat {
+        constructor(locale, opts = {}) { this._opts = opts || {} }
+        format(n) {
+            const o = this._opts
+            if (o.style === 'percent') return String(Number(n) * 100) + '%'
+            if (o.minimumFractionDigits || o.maximumFractionDigits) return Number(n).toFixed(o.maximumFractionDigits || o.minimumFractionDigits)
+            return String(n)
+        }
+        resolvedOptions() { return { locale: 'en-US', ...this._opts } }
+        static supportedLocalesOf(l) { return Array.isArray(l) ? l : [l] }
+    }
+    class Locale {
+        constructor(tag) { this.baseName = String(tag); this.language = String(tag).split('-')[0] }
+        toString() { return this.baseName }
+    }
+    globalThis.Intl = { DateTimeFormat, NumberFormat, Locale, getCanonicalLocales: l => Array.isArray(l) ? l : [l] }
+    console.log('[payload] Intl polyfill installed (Intl=' + typeof Intl.DateTimeFormat + ')')
+}
+console.log('[payload] runtime globals: WebAssembly=' + typeof WebAssembly + ' Intl=' + typeof Intl)
+
 // 任务注册表: config/jd.ini [alias] + title= + map= (对齐 Android Runner.listTasks)
 function loadTasks() {
     const out = []
