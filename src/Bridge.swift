@@ -29,23 +29,45 @@ enum JDHelper {
 
     // MARK: - 公共入口
 
-    /// 返回 "pt_key=..;pt_pin=..;"，失败返回空串
+    /// 返回全量 cookie 行 (guid/pt_pin/pt_key + 设备指纹字段)，失败返回空串
     static func grabCookie(_ onLine: @escaping (String) -> Void) -> String {
-        let hits = runTargeted(verbose: false, onLine: onLine)
-        guard let bk = bestKey(hits) else {
+        var jar: [String: String] = [:]
+        let hits = runTargeted(verbose: false, jar: &jar, onLine: onLine)
+        // pt_key 优先级: 扫描命中 (app_openAAJq 优先) > cookies 库
+        var dict = jar
+        if let bk = bestKey(hits) { dict["pt_key"] = bk }
+        if dict["pt_pin"] == nil || dict["pt_pin"]!.isEmpty {
+            let rawPin = bestPin(hits) ?? ""
+            let pin = urlDecode(rawPin)
+            if !pin.isEmpty { dict["pt_pin"] = pin }
+        } else {
+            let dec = urlDecode(dict["pt_pin"]!)
+            if !dec.isEmpty { dict["pt_pin"] = dec }
+        }
+        guard dict["pt_key"] != nil, !(dict["pt_key"]!.isEmpty) else {
             onLine("[jd] NO pt_key found")
             return ""
         }
-        let rawPin = bestPin(hits) ?? ""
-        let pin = urlDecode(rawPin)
-        onLine("[jd] key len=\(bk.count) prefix=\(bk.prefix(12))… pin=\(pin.isEmpty ? "(none)" : "ok")")
-        return pin.isEmpty ? "pt_key=\(bk);" : "pt_key=\(bk);pt_pin=\(pin);"
+        // 组装: guid/pt_pin 开头 (riskKeep 正则 ^guid=|^pt_pin=), 再 pt_key, 其余字典序
+        var ordered: [String] = []
+        for k in ["guid", "pt_pin", "pt_key"] {
+            if let v = dict[k], !v.isEmpty { ordered.append("\(k)=\(v);") }
+            dict.removeValue(forKey: k)
+        }
+        for (k, v) in dict.sorted(by: { $0.key < $1.key }) where !v.isEmpty {
+            ordered.append("\(k)=\(v);")
+        }
+        let ck = ordered.joined()
+        onLine("[jd] cookie fields=\(ordered.count) len=\(ck.count)")
+        return ck
     }
 
     /// 诊断模式：输出每个窝点清单 + 全部命中
     @discardableResult
     static func scanSandbox(_ onLine: @escaping (String) -> Void) -> String {
-        let hits = runTargeted(verbose: true, onLine: onLine)
+        var jar: [String: String] = [:]
+        let hits = runTargeted(verbose: true, jar: &jar, onLine: onLine)
+        onLine("[jd] cookie fields: " + jar.keys.sorted().joined(separator: ","))
         for h in hits {
             if !h.key.isEmpty { onLine("KEY  [\(h.src)] \(h.key)") }
             if !h.pin.isEmpty { onLine("PIN  [\(h.src)] \(h.pin)") }
@@ -55,7 +77,7 @@ enum JDHelper {
 
     // MARK: - 精准提取
 
-    private static func runTargeted(verbose: Bool, onLine: @escaping (String) -> Void) -> [Hit] {
+    private static func runTargeted(verbose: Bool, jar: inout [String: String], onLine: @escaping (String) -> Void) -> [Hit] {
         var hits: [Hit] = []
         var seen = Set<String>()
         let conts = findContainers(onLine: onLine)
@@ -94,7 +116,20 @@ enum JDHelper {
                         }
                         read += 1
                         let before = hits.count
-                        collect(b, path: dir + "/" + n, into: &hits, seen: &seen)
+                        // binarycookies: 全量解析 cookie 字段
+                        if b.starts(with: [0x63, 0x6F, 0x6F, 0x6B]) {
+                            let got = harvestBinaryCookies(b)
+                            if !got.isEmpty {
+                                for (k, v) in got { jar[k] = v }
+                                if verbose { onLine("[jd] cookies \(dir)/\(n): +\(got.count) fields") }
+                            }
+                        } else if p.contains("jdmobile.plist"), jar["guid"] == nil {
+                            harvestGuid(b, into: &jar)
+                        }
+                        // 常规匹配 (pt_key/pt_pin 等)
+                        if hits.count < 64 {
+                            collect(b, path: dir + "/" + n, into: &hits, seen: &seen)
+                        }
                         if verbose && hits.count > before {
                             onLine("[jd] ++ \(dir)/\(n) (\(hits.count - before) hits)")
                         }
@@ -105,8 +140,61 @@ enum JDHelper {
                 }
             }
         }
-        onLine("[jd] hits=\(hits.count)")
+        onLine("[jd] hits=\(hits.count) cookieFields=\(jar.count)")
         return hits
+    }
+
+    /// binarycookies (magic 'cook') 全量解析 → name/value (已 URL 解码)
+    static func harvestBinaryCookies(_ data: Data) -> [(String, String)] {
+        var out: [(String, String)] = []
+        let b = [UInt8](data)
+        func u32(_ off: Int) -> Int {
+            guard off >= 0, off + 4 <= b.count else { return 0 }
+            return Int(b[off]) << 24 | Int(b[off + 1]) << 16 | Int(b[off + 2]) << 8 | Int(b[off + 3])
+        }
+        guard b.count > 12, u32(0) == 0x636F6F6B else { return out } // 'cook'
+        let numPages = min(u32(4), 128)
+        guard numPages > 0 else { return out }
+        var pageOffs: [Int] = []
+        for p in 0..<numPages { pageOffs.append(u32(8 + p * 4)) }
+        for pageOff in pageOffs {
+            guard pageOff > 0, pageOff + 8 <= b.count else { continue }
+            let nCookies = u32(pageOff + 4)
+            guard nCookies > 0, nCookies < 5000 else { continue }
+            for ci in 0..<nCookies {
+                let cOff = u32(pageOff + 8 + ci * 4)
+                guard cOff > 0, cOff + 20 <= b.count else { continue }
+                let size = u32(cOff)
+                guard size >= 24, cOff + size <= b.count else { continue }
+                func str(_ off: Int) -> String {
+                    guard off > 0, cOff + off < cOff + size else { return "" }
+                    var e = cOff + off
+                    while e < cOff + size && b[e] != 0 { e += 1 }
+                    return String(bytes: b[(cOff + off)..<min(e, b.count)], encoding: .utf8) ?? ""
+                }
+                let url = str(u32(cOff + 8))
+                let name = str(u32(cOff + 12))
+                var val = str(u32(cOff + 20))
+                if val.isEmpty { continue }
+                if let dec = val.removingPercentEncoding { val = dec }
+                // 只收京东系域名
+                guard url.contains("jd") || url.contains("jingdong") || url.contains("360buy") else { continue }
+                if !name.isEmpty { out.append((name, val)) }
+            }
+        }
+        return out
+    }
+
+    /// JD 主 plist 里抠 guid
+    static func harvestGuid(_ data: Data, into jar: inout [String: String]) {
+        guard let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else { return }
+        for (k, v) in obj {
+            if jar["guid"] != nil { break }
+            let kl = k.lowercased()
+            guard kl.contains("guid") else { continue }
+            if let s = v as? String, s.count > 6, s.count < 128 { jar["guid"] = s }
+            else if let d = v as? Data, d.count > 6, d.count < 128 { jar["guid"] = String(bytes: d, encoding: .utf8) ?? "" }
+        }
     }
 
     /// 只读 metadata.plist 定位京东容器（不碰任何内容文件）
