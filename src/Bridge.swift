@@ -1,9 +1,9 @@
 import Foundation
 import Darwin
 
-/// 京东沙盒扫描器
-/// app 本体带 no-sandbox entitlement（TrollStore），进程内直接读 /var/mobile 京东容器
-/// 不依赖 spawn helper（真机 posix_spawn 返回 EPERM，spawn 路线已废）
+/// 京东 cookie 精准提取（无扫描版）
+/// 1. 只读各 Application/*/metadata.plist 定位京东容器（秒级, 零内存压力）
+/// 2. 只读已知 cookie 窝点的小文件, 不做全盘暴力扫描（旧版全盘扫描 OOM 被 jetsam 杀）
 enum JDHelper {
     struct Hit {
         var key = ""   // pt_key value (app_open...)
@@ -15,25 +15,37 @@ enum JDHelper {
     // UTF-16BE "pt_key" = p\0t\0_\0k\0e\0y\0
     private static let utf16Needle: [UInt8] = [0x70, 0x00, 0x74, 0x00, 0x5F, 0x00, 0x6B, 0x00, 0x65, 0x00, 0x79, 0x00]
 
+    // 容器内 cookie 窝点（精准, 全是小文件）
+    private static let targetDirs = [
+        "Library/Cookies",
+        "Library/Preferences",
+        "Library/HTTPStorages",
+        "Library/WebKit/WebsiteData",
+        "Library/Application Support",
+        "Documents",
+    ]
+    private static let maxFileSize = 16 * 1024 * 1024
+    private static let maxFilesPerDir = 400
+
     // MARK: - 公共入口
 
     /// 返回 "pt_key=..;pt_pin=..;"，失败返回空串
     static func grabCookie(_ onLine: @escaping (String) -> Void) -> String {
-        let hits = runScan(verbose: false, onLine: onLine)
+        let hits = runTargeted(verbose: false, onLine: onLine)
         guard let bk = bestKey(hits) else {
-            onLine("[scan] 进程内没货 → helper spawn 兜底")
-            return tryHelperFallback(onLine)
+            onLine("[jd] NO pt_key found")
+            return ""
         }
         let rawPin = bestPin(hits) ?? ""
         let pin = urlDecode(rawPin)
-        onLine("[scan] key len=\(bk.count) prefix=\(bk.prefix(12))… pin=\(pin.isEmpty ? "(none)" : "ok")")
+        onLine("[jd] key len=\(bk.count) prefix=\(bk.prefix(12))… pin=\(pin.isEmpty ? "(none)" : "ok")")
         return pin.isEmpty ? "pt_key=\(bk);" : "pt_key=\(bk);pt_pin=\(pin);"
     }
 
-    /// 诊断模式：全量输出
+    /// 诊断模式：输出每个窝点清单 + 全部命中
     @discardableResult
     static func scanSandbox(_ onLine: @escaping (String) -> Void) -> String {
-        let hits = runScan(verbose: true, onLine: onLine)
+        let hits = runTargeted(verbose: true, onLine: onLine)
         for h in hits {
             if !h.key.isEmpty { onLine("KEY  [\(h.src)] \(h.key)") }
             if !h.pin.isEmpty { onLine("PIN  [\(h.src)] \(h.pin)") }
@@ -41,119 +53,113 @@ enum JDHelper {
         return hits.map { "\($0.src)|k=\($0.key)|p=\($0.pin)" }.joined(separator: "\n")
     }
 
-    // MARK: - 容器定位与遍历
+    // MARK: - 精准提取
 
-    private static func runScan(verbose: Bool, onLine: @escaping (String) -> Void) -> [Hit] {
+    private static func runTargeted(verbose: Bool, onLine: @escaping (String) -> Void) -> [Hit] {
         var hits: [Hit] = []
+        var seen = Set<String>()
+        let conts = findContainers(onLine: onLine)
+        onLine("[jd] containers: \(conts.count)")
+        for c in conts { onLine("[jd]   " + c) }
+        guard !conts.isEmpty else { return hits }
+
+        let fm = FileManager.default
+        for cont in conts {
+            for dir in targetDirs {
+                let dpath = cont + "/" + dir
+                guard fm.fileExists(atPath: dpath) else {
+                    if verbose { onLine("[jd] (no) \(dir)") }
+                    continue
+                }
+                let names = (try? fm.contentsOfDirectory(atPath: dpath)) ?? []
+                var read = 0
+                autoreleasepool {
+                    for n in names {
+                        if read >= maxFilesPerDir {
+                            if verbose { onLine("[jd] file cap hit at \(dir)") }
+                            break
+                        }
+                        let p = dpath + "/" + n
+                        var st = stat()
+                        guard lstat(p, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { continue }
+                        let sz = Int(st.st_size)
+                        if sz > maxFileSize {
+                            if verbose { onLine("[jd] skip big(\(sz)) \(dir)/\(n)") }
+                            continue
+                        }
+                        if sz < 16 { continue }
+                        guard let b = fm.contents(atPath: p) else {
+                            if verbose { onLine("[jd] open fail \(dir)/\(n)") }
+                            continue
+                        }
+                        read += 1
+                        let before = hits.count
+                        collect(b, path: dir + "/" + n, into: &hits, seen: &seen)
+                        if verbose && hits.count > before {
+                            onLine("[jd] ++ \(dir)/\(n) (\(hits.count - before) hits)")
+                        }
+                    }
+                }
+                if verbose || read > 0 {
+                    onLine("[jd] \(dir): files read=\(read)/\(names.count)")
+                }
+            }
+        }
+        onLine("[jd] hits=\(hits.count)")
+        return hits
+    }
+
+    /// 只读 metadata.plist 定位京东容器（不碰任何内容文件）
+    private static func findContainers(onLine: @escaping (String) -> Void) -> [String] {
         let fm = FileManager.default
         let bases = ["/var/mobile/Containers/Data/Application",
                      "/var/containers/Shared/AppGroup",
                      "/var/mobile/Containers/Shared/AppGroup"]
-        var conts: [String] = []
+        var out: [String] = []
         for base in bases {
             let namesOpt = try? fm.contentsOfDirectory(atPath: base)
             if namesOpt == nil {
-                onLine("[scan] base DENIED: \(base) readable=\(fm.isReadableFile(atPath: base)) (entitlements 可能没生效)")
+                onLine("[jd] base DENIED: \(base) (entitlements 没生效?)")
                 continue
             }
-            let names = namesOpt!
-            if names.isEmpty {
-                onLine("[scan] base empty: \(base)")
-                continue
-            }
-            for n in names where !n.hasPrefix(".") {
+            for n in namesOpt! where !n.hasPrefix(".") {
                 let meta = base + "/" + n + "/.com.apple.mobile_container_manager.metadata.plist"
-                if let d = fm.contents(atPath: meta), d.range(of: Data(jdBundle.utf8)) != nil {
-                    conts.append(base + "/" + n)
+                guard let d = fm.contents(atPath: meta) else { continue }
+                if d.range(of: Data(jdBundle.utf8)) != nil {
+                    out.append(base + "/" + n)
                 }
             }
         }
-        onLine("[scan] containers found: \(conts.count)")
-        for c in conts { onLine("[scan]   " + c) }
-        guard !conts.isEmpty else { return hits }
-
-        var files = 0, scanned = 0, totalKB = 0
-        var seen = Set<String>()
-        for c in conts {
-            walk(c, depth: 0, verbose: verbose, into: &hits, seen: &seen, files: &files, scanned: &scanned, kb: &totalKB, onLine: onLine)
-        }
-        onLine("[scan] files=\(files) scanned=\(scanned) totalKB=\(totalKB) hits=\(hits.count)")
-        return hits
-    }
-
-    private static func walk(_ dir: String, depth: Int, verbose: Bool, into hits: inout [Hit], seen: inout Set<String>, files: inout Int, scanned: inout Int, kb: inout Int, onLine: @escaping (String) -> Void) {
-        if depth > 8 { return }
-        let fm = FileManager.default
-        let names = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
-        if names.isEmpty {
-            if verbose { onLine("[scan] dir fail/empty: \(dir)") }
-            return
-        }
-        for n in names where !n.hasPrefix(".") {
-            let p = dir + "/" + n
-            var st = stat()
-            guard lstat(p, &st) == 0 else { continue }
-            let fmt = st.st_mode & S_IFMT
-            if fmt == S_IFDIR {
-                walk(p, depth: depth + 1, verbose: verbose, into: &hits, seen: &seen, files: &files, scanned: &scanned, kb: &kb, onLine: onLine)
-            } else if fmt == S_IFREG {
-                files += 1
-                let sz = Int(st.st_size)
-                if sz > 64 * 1024 * 1024 {
-                    if verbose { onLine("[scan] skip big(\(sz)): \(p)") }
-                    continue
-                }
-                if sz < 16 { continue }
-                guard let b = fm.contents(atPath: p) else {
-                    if verbose { onLine("[scan] open fail: \(p)") }
-                    continue
-                }
-                scanned += 1
-                kb += sz / 1024
-                // 全局硬上限 64 + 去重：SDK 日志/缓存里 app_open 能命中几万次, 不限直接 OOM 被 jetsam 杀
-                if hits.count < 64 {
-                    for h in scanBuf(b, path: p) {
-                        if hits.count >= 64 { break }
-                        let sig = h.key.isEmpty ? "p|\(h.pin)" : "k|\(h.key)"
-                        if seen.contains(sig) { continue }
-                        seen.insert(sig)
-                        hits.append(h)
-                    }
-                }
-                if scanned % 500 == 0 { onLine("[scan] …\(scanned) files") }
-            }
-        }
+        return out
     }
 
     // MARK: - 内容匹配
 
-    private static func scanBuf(_ data: Data, path: String) -> [Hit] {
-        var out: [Hit] = []
+    private static func collect(_ data: Data, path: String, into hits: inout [Hit], seen: inout Set<String>) {
+        var buf: [Hit] = []
         data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             let b = base.assumingMemoryBound(to: UInt8.self)
             let sz = raw.count
             var i = 0
             while i < sz - 10 {
-                if out.count >= 16 { return } // 单文件上限, 防大日志文件百万次匹配
-                // 所有匹配串都以 'p' 或 'a' 开头，快速跳过
+                if buf.count >= 16 { return } // 单文件上限
                 let c = b[i]
-                if c != 0x70 && c != 0x61 { i += 1; continue }
+                if c != 0x70 && c != 0x61 { i += 1; continue } // 只看 'p'/'a' 开头
                 if memcmp(b + i, "pt_key", 6) == 0 {
                     var vl = 0
                     let vs = extractValue(b, sz, i + 6, &vl)
                     if vs > 0 {
                         let key = bytesToStr(b, vs, vl)
-                        if key.hasPrefix("app_open") { out.append(Hit(key: key, src: path)) }
+                        if key.hasPrefix("app_open") { buf.append(Hit(key: key, src: path)) }
                     }
                 } else if memcmp(b + i, "pt_pin", 6) == 0 {
                     var vl = 0
                     let vs = extractValue(b, sz, i + 6, &vl)
                     if vs > 0 {
-                        out.append(Hit(pin: bytesToStr(b, vs, vl), src: path))
+                        buf.append(Hit(pin: bytesToStr(b, vs, vl), src: path))
                     }
                 } else if memcmp(b + i, utf16Needle, 12) == 0 {
-                    // UTF-16BE "pt_key"，value 同样 UTF-16BE
                     var j = i + 12
                     while j + 1 < sz && b[j+1] == 0 && b[j] != 0 && b[j] != 0x3B && j - i < 1100 { j += 2 }
                     var kn = 0
@@ -165,7 +171,7 @@ enum JDHelper {
                         key[kn] = cc; kn += 1; k += 2
                     }
                     let ks = String(bytes: key[0..<kn], encoding: .utf8) ?? ""
-                    if kn > 8 && ks.hasPrefix("app_open") { out.append(Hit(key: ks, src: path)) }
+                    if kn > 8 && ks.hasPrefix("app_open") { buf.append(Hit(key: ks, src: path)) }
                 } else if memcmp(b + i, "app_open", 8) == 0 {
                     if i >= 7 && memcmp(b + i - 7, "pt_key=", 7) == 0 { i += 1; continue }
                     var j = i + 8
@@ -173,13 +179,19 @@ enum JDHelper {
                             b[j] != 0x0D && b[j] != 0x20 && b[j] != 0 && j - i < 500 { j += 1 }
                     if j - i >= 16 {
                         let key = bytesToStr(b, i, j - i)
-                        if !key.isEmpty { out.append(Hit(key: key, src: path)) }
+                        if !key.isEmpty { buf.append(Hit(key: key, src: path)) }
                     }
                 }
                 i += 1
             }
         }
-        return out
+        for h in buf {
+            if hits.count >= 64 { return } // 全局上限
+            let sig = h.key.isEmpty ? "p|\(h.pin)" : "k|\(h.key)"
+            if seen.contains(sig) { continue }
+            seen.insert(sig)
+            hits.append(h)
+        }
     }
 
     /// 跳过 '=' 或 %3D/%3d，取 value 到终止符；返回起始偏移，vlen 输出长度，失败 -1
@@ -238,60 +250,6 @@ enum JDHelper {
 
     private static func urlDecode(_ s: String) -> String {
         s.removingPercentEncoding ?? s
-    }
-
-    // MARK: - helper spawn 兜底（预期 EPERM，白试不亏）
-
-    private static func tryHelperFallback(_ onLine: @escaping (String) -> Void) -> String {
-        let out = spawnHelper(["cookie"], onLine: onLine)
-        if let r = out.range(of: "###COOKIE###"), let e = out.range(of: "###END###") {
-            return String(out[r.upperBound..<e.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return ""
-    }
-
-    private static func spawnHelper(_ args: [String], onLine: @escaping (String) -> Void) -> String {
-        let helper = Bundle.main.path(forAuxiliaryExecutable: "PsyduckHelper") ?? ""
-        if helper.isEmpty {
-            onLine("[helper] PsyduckHelper not in bundle")
-            return ""
-        }
-        var pipeOut: [Int32] = [0, 0]
-        guard pipe(&pipeOut) == 0 else {
-            onLine("[helper] pipe fail")
-            return ""
-        }
-        var attr = posix_spawnattr_t(bitPattern: 0)
-        posix_spawnattr_init(&attr)
-        var fileActions: posix_spawn_file_actions_t? = nil
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_adddup2(&fileActions, pipeOut[1], 1)
-        posix_spawn_file_actions_adddup2(&fileActions, pipeOut[1], 2)
-        var pid = pid_t(0)
-        let argvp: [UnsafeMutablePointer<CChar>?] = [strdup(helper)] + args.map { strdup($0) } + [nil]
-        var envp: [UnsafeMutablePointer<CChar>?] = [nil]
-        let rc = posix_spawn(&pid, helper, &fileActions, &attr, argvp, envp)
-        posix_spawn_file_actions_destroy(&fileActions)
-        guard rc == 0 else {
-            onLine("[helper] spawn fail rc=\(rc)")
-            return ""
-        }
-        close(pipeOut[1])
-        var data = Data()
-        let fd = pipeOut[0]
-        var buf = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let n = read(fd, &buf, buf.count)
-            if n <= 0 { break }
-            data.append(contentsOf: buf[0..<n])
-        }
-        close(fd)
-        waitpid(pid, nil, 0)
-        let s = String(data: data, encoding: .utf8) ?? ""
-        for line in s.components(separatedBy: "\n") where !line.isEmpty && !line.contains("###COOKIE###") && !line.contains("###END###") {
-            onLine("[helper] " + line)
-        }
-        return s
     }
 }
 
