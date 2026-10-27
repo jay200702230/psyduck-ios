@@ -20,7 +20,6 @@ enum JDHelper {
 
     static func runRoot(_ bin: String, args: [String], onLine: @escaping (String) -> Void) -> String {
         // TrollStore 环境: app 无沙箱 + persona-mgmt → 直接 posix_spawn 即 root
-        // iOS 无 Foundation.Process → 用 posix_spawn
         var pipeOut: [Int32] = [0, 0]
         guard pipe(&pipeOut) == 0 else {
             onLine("[helper] pipe fail")
@@ -67,22 +66,36 @@ enum Payload {
             .appendingPathComponent("payload")
     }
 
-    static func install(cookie: String) {
+    /// 安装 payload（与 cookie 无关，app 启动即装）
+    @discardableResult
+    static func install() -> Bool {
         let fm = FileManager.default
         let dst = payloadDir
-        // 首次安装（bundle 内 mjs 资源被平铺 → 从 bundle 根收拢到 Documents/payload）
-        if !fm.fileExists(atPath: dst.path) {
-            try? fm.createDirectory(at: dst, withIntermediateDirectories: true)
-            // 收拢平铺的 mjs 资源
-            if let files = try? fm.contentsOfDirectory(atPath: Bundle.main.bundlePath) {
-                for f in files where f.hasSuffix(".mjs") {
-                    let s = Bundle.main.bundlePath + "/" + f
-                    try? fm.copyItem(atPath: s, toPath: dst.appendingPathComponent(f).path)
+        let entry = dst.appendingPathComponent("main_ios.mjs").path
+        guard !fm.fileExists(atPath: entry) else { return true } // 已装
+        try? fm.createDirectory(at: dst, withIntermediateDirectories: true)
+        var ok = false
+        // bundle 内 mjs 资源被平铺到 app 根 → 收拢
+        if let files = try? fm.contentsOfDirectory(atPath: Bundle.main.bundlePath) {
+            for f in files where f.hasSuffix(".mjs") {
+                let s = Bundle.main.bundlePath + "/" + f
+                do {
+                    if fm.fileExists(atPath: dst.appendingPathComponent(f).path) {
+                        try? fm.removeItem(at: dst.appendingPathComponent(f))
+                    }
+                    try fm.copyItem(atPath: s, toPath: dst.appendingPathComponent(f).path)
+                    ok = true
+                } catch {
+                    ok = false
                 }
             }
         }
-        // 写 cookie/jd.ini
-        let iniDir = dst.appendingPathComponent("cookie")
+        return ok
+    }
+
+    static func writeCookie(_ cookie: String) {
+        let fm = FileManager.default
+        let iniDir = payloadDir.appendingPathComponent("cookie")
         try? fm.createDirectory(at: iniDir, withIntermediateDirectories: true)
         let ini = iniDir.appendingPathComponent("jd.ini")
         let body = "[main]\n\(cookie)\n"
@@ -95,11 +108,10 @@ enum NodeRunner {
     static func start(_ onLine: @escaping (String) -> Void) {
         let entry = Payload.payloadDir.appendingPathComponent("main_ios.mjs").path
         guard FileManager.default.fileExists(atPath: entry) else {
-            onLine("[node] entry missing: main_ios.mjs")
+            onLine("[node] entry missing: main_ios.mjs（payload 未安装）")
             return
         }
         onLine("[node] starting: \(entry)")
-        // argv[0] 是程序名
         let args = ["node", entry]
         NodeMobileBridge.startNode(args: args, onLine: onLine)
     }
