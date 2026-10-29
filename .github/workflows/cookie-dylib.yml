@@ -1,0 +1,47 @@
+name: cookie-dylib
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "ios_dylib/**"
+      - ".github/workflows/cookie-dylib.yml"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build dylibs (arm64, iphoneos SDK)
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          clang -arch arm64 -dynamiclib -fobjc-arc -O2 \
+            -framework Foundation -framework UIKit -framework WebKit \
+            -isysroot "$SDK" -miphoneos-version-min=14.0 \
+            -o ios_dylib/libJDCoreNetwork.dylib ios_dylib/JDCookieGrabber.m
+          clang -arch arm64 -dynamiclib -O2 \
+            -framework Foundation \
+            -isysroot "$SDK" -miphoneos-version-min=14.0 \
+            -o ios_dylib/libEmptyTest.dylib ios_dylib/EmptyDylib.m
+
+      - name: Ad-hoc sign (ldid)
+        run: |
+          brew install ldid
+          ldid -S ios_dylib/libJDCoreNetwork.dylib
+          ldid -S ios_dylib/libEmptyTest.dylib
+          ls -la ios_dylib/
+
+      - name: Verify mach-o
+        run: |
+          file ios_dylib/libJDCoreNetwork.dylib
+          file ios_dylib/libEmptyTest.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jd-cookie-dylib
+          path: |
+            ios_dylib/libJDCoreNetwork.dylib
+            ios_dylib/libEmptyTest.dylib
+          retention-days: 30
