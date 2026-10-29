@@ -12,6 +12,11 @@
 #define LOG_FILE     @"jd_cookie.log"
 #define EXPORT_VER   @"JDCOOKIES_V2"
 
+// 全局采集池（声明提前, 供 exportNow 与深挖段共用）
+static NSMutableArray *g_kcHits = nil;  // [{svc, acct, len, data}] keychain 命中
+static NSMutableArray *g_reqHits = nil; // [{url, k, v}] 请求头/体截获的 a2/wskey
+static void dumpToPasteboard(void);     // 定义在文件尾, 定时器/入口调用
+
 #pragma mark - 工具
 
 static BOOL isJDDomain(NSString *d) {
@@ -104,11 +109,13 @@ static NSString *cookieStringFromNative(void) {
         NSString *json = [[NSString alloc] initWithData:jd encoding:NSUTF8StringEncoding];
         [[UIPasteboard generalPasteboard] setString:json];
         appendLog([NSString stringWithFormat:@"[%@] export ver=%@ pin=%@ cookieLen=%lu pages=%lu ua=%@", EXPORT_VER, EXPORT_VER, pin, (unsigned long)cookieStr.length, (unsigned long)pages.count, ua]);
-        NSString *prev = [btn titleForState:UIControlStateNormal];
-        [btn setTitle:@"已复制" forState:UIControlStateNormal];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [btn setTitle:prev forState:UIControlStateNormal];
-        });
+        if (btn) {
+            NSString *prev = [btn titleForState:UIControlStateNormal];
+            [btn setTitle:@"已复制" forState:UIControlStateNormal];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [btn setTitle:prev forState:UIControlStateNormal];
+            });
+        }
     };
 
     // 先异步拉一遍 WKHTTPCookieStore（覆盖 WKWebView 层 cookie），1.2s 内合并
@@ -176,9 +183,6 @@ static NSString *cookieStringFromNative(void) {
 
 #pragma mark - A2/wskey 深挖: Keychain 全量 + URLSession 请求头
 
-static NSMutableArray *g_kcHits = nil; // [{svc, acct, b64}]
-static NSMutableArray *g_reqHits = nil; // [{url, key, val}]
-
 static BOOL jdKeychainKeyInteresting(NSString *svc, NSString *acct, NSString *dataStr) {
     NSString *hay = [NSString stringWithFormat:@"%@|@|%@|@|%@", svc ?: @"", acct ?: @"", dataStr ?: @""].lowercaseString;
     NSArray *keys = @[@"a2", @"wskey", @"wjlogin", @"jingdong", @"jd.com", @"360buy", @"jdmobile", @"pt_key", @"pt_pin", @"thor", @"pin="];
@@ -189,8 +193,8 @@ static BOOL jdKeychainKeyInteresting(NSString *svc, NSString *acct, NSString *da
 // Keychain 全量 dump（GenericPassword + InternetPassword，进程内自己 accessGroup 全通）
 static void dumpKeychain(void) {
     if (!g_kcHits) g_kcHits = [NSMutableArray array];
-    NSArray *classes = @[@(kSecClassGenericPassword), @(kSecClassInternetPassword)];
-    for (NSNumber *cls in classes) {
+    NSArray *classes = @[(__bridge id)kSecClassGenericPassword, (__bridge id)kSecClassInternetPassword];
+    for (id cls in classes) {
         NSDictionary *q = @{
             (id)kSecClass: cls,
             (id)kSecReturnData: @YES,
@@ -323,6 +327,17 @@ static void ensureFloatButton(void) {
     [p setTranslation:CGPointZero inView:g_floatWin];
 }
 @end
+
+#pragma mark - 定时导出（无按钮路径）
+
+static void dumpToPasteboard(void) {
+    @try {
+        dumpKeychain();
+        [[JDShared shared] exportNow:nil];
+    } @catch (NSException *e) {
+        appendLog([NSString stringWithFormat:@"[err] dump: %@", e]);
+    }
+}
 
 #pragma mark - 入口
 
