@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct PsyduckApp: App {
@@ -62,6 +63,119 @@ final class AppState: ObservableObject {
     var capturingAssets = false
     var assetLines: [String] = []
     var onAssets: ((String) -> Void)?
+    // 日志过滤状态 (对齐安卓 ProgressRenderer)
+    static var curPin: String?
+    static var skipCont = false
+    static var nickCache: [String: String]? = nil
+
+    private static let reRun = try! NSRegularExpression(pattern: #"^\[Run\]\s*运行账户[:：]\s*(\S+)"#)
+    private static let reTemp = try! NSRegularExpression(pattern: #"^\[Temp\]\s*账户[:：]\s*(\S+)\s*(.*)$"#)
+    private static let reAward = try! NSRegularExpression(pattern: #"^\[(Bean|Card|Coupon|Redpacket|Reward)\s*([^\]]*)\]\s*:?\s*(.*)$"#)
+    private static let reLog = try! NSRegularExpression(pattern: #"^\[(Log|Msg|Info|Error|Warn|Debug)\s*([^\]]*)\]\s*(.*)$"#)
+    private static let reNoise = try! NSRegularExpression(pattern: #"^\[(Date|Script|Crontab|TempKey|ValidKey|Key|Interval|Map|Mapping|Task|TempExpire|UserData|ValidCookie|Readme|Field|Model|Turn|Schedule|Temp|Run|Delay|Sync|Verify|Help|Context|Cookie|Status|Timer|Token|Proxy|Relay|Code|Category|Finsish)\]"#)
+
+    private static func caps(_ re: NSRegularExpression, _ s: String) -> [String]? {
+        guard let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) else { return nil }
+        return (0..<m.numberOfRanges).map { rg in
+            m.range(at: rg).location == NSNotFound ? "" : String(s[Range(m.range(at: rg), in: s)!])
+        }
+    }
+
+    /// pin → 昵称 (jdUser.ini userName)
+    static func nick(_ pin: String) -> String {
+        if nickCache == nil {
+            var m: [String: String] = [:]
+            let p = Payload.payloadDir.appendingPathComponent("config/jdUser.ini").path
+            if let txt = try? String(contentsOfFile: p, encoding: .utf8) {
+                var cur = ""
+                for raw in txt.components(separatedBy: .newlines) {
+                    let l = raw.trimmingCharacters(in: .whitespaces)
+                    if l.hasPrefix("[") && l.hasSuffix("]") {
+                        if !cur.isEmpty { m[cur] = m[cur] ?? "" }
+                        cur = String(l.dropFirst().dropLast())
+                    } else if l.hasPrefix("userName=") && !cur.isEmpty {
+                        m[cur] = String(l.dropFirst(9)).trimmingCharacters(in: .whitespaces)
+                    }
+                }
+            }
+            nickCache = m
+        }
+        let n = nickCache?[pin] ?? ""
+        return n.isEmpty ? "账号" : n
+    }
+
+    /// 消息清洗 (对齐 clean()): '{' 截断 + 常见异常改写
+    static func cleanMsg(_ msg0: String) -> String {
+        var msg = msg0.trimmingCharacters(in: .whitespaces)
+        if msg.isEmpty { return "" }
+        if let brace = msg.firstIndex(of: "{") { msg = String(msg[..<brace]).trimmingCharacters(in: .whitespaces) }
+        if msg.isEmpty { return "" }
+        if msg.contains("Cannot read propert") || msg.contains("of undefined") || msg.contains("is not a function") {
+            return "脚本内部异常(接口数据变了)，本项跳过"
+        }
+        let low = msg.lowercased()
+        if msg.contains("ETIMEDOUT") || low.contains("timeout") { return "请求超时，稍后重试" }
+        if msg.contains("ECONNRESET") || msg.contains("socket hang up") { return "连接被重置(网络或风控)" }
+        return msg
+    }
+
+    static func awardText(_ kind: String, _ val0: String) -> String {
+        let val = val0.isEmpty ? "0" : val0
+        switch kind {
+        case "Bean": return "获得 " + val + " 京豆"
+        case "Redpacket": return "获得红包 " + val + " 元"
+        case "Card": return "获得超市卡 " + val + " 元"
+        case "Coupon": return "获得优惠券 " + val + " 张"
+        default: return "获得奖励 " + val
+        }
+    }
+
+    /// 框架输出过滤 (对齐 ProgressRenderer.on): 只留账号级明细, 配置头/分隔线/ShareCode 全滤
+    static func frameworkFilter(_ raw: String) -> String? {
+        let l = raw.trimmingCharacters(in: .whitespaces)
+        if l.isEmpty || l == "End" { return nil }
+        skipCont = false
+        if let c = caps(reRun, l) { curPin = c[1]; return "   👤 " + nick(c[1]) + " 开始" }
+        if let c = caps(reTemp, l) { curPin = c[1]; return "   · " + nick(c[1]) + " 今日已完成，跳过" }
+        if let c = caps(reAward, l) {
+            let who0 = c[2].trimmingCharacters(in: .whitespaces)
+            if !who0.isEmpty { curPin = who0 }
+            let who = (curPin?.isEmpty == false) ? nick(curPin!) + " " : ""
+            return "   💰 " + who + awardText(c[1], c[3].trimmingCharacters(in: .whitespaces))
+        }
+        if let c = caps(reLog, l) {
+            let pin = c[2].trimmingCharacters(in: .whitespaces)
+            if !pin.isEmpty { curPin = pin }
+            let msg = cleanMsg(c[3])
+            if msg.isEmpty { return nil }
+            let who = pin.isEmpty ? "" : nick(pin) + " "
+            var out = "   · " + who + msg
+            if out.count > 260 { out = String(out.prefix(260)) + "…(已截断)" }
+            return out
+        }
+        if let f = l.first, f == "=" || f == "-" { return nil }
+        if caps(reNoise, l) != nil { skipCont = true; return nil }
+        if let f = l.first, f != "[" {
+            if skipCont { return nil }
+            if f == ";" || f == "#" { return nil }
+            let cm = cleanMsg(l)
+            if cm.isEmpty { return nil }
+            let who = (curPin?.isEmpty == false) ? nick(curPin!) + " " : ""
+            var out = "   · " + who + cm
+            if out.count > 260 { out = String(out.prefix(260)) + "…(已截断)" }
+            return out
+        }
+        return nil
+    }
+
+    /// shim 自身诊断行去噪
+    static func shimNoise(_ l: String) -> Bool {
+        let drop = ["import jd_task_", "imported in ", ", init…", "profile enc re-armed", "profile armed:",
+                    "runtime globals", "runtime ready", "waiting cmd.json", "启动 node 运行时…",
+                    "[node] starting:", "_parseConfig ok", "initConfiguration ok", "_parseConfig args",
+                    "initConfiguration args"]
+        return drop.contains { l.contains($0) }
+    }
 
     private let df: DateFormatter = {
         let f = DateFormatter()
@@ -77,13 +191,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// node stdout 行入口: [ui] 指令行驱动状态卡, 其余进日志
+    /// node stdout 行入口: [ui] 指令行驱动状态卡, shim 行直通(去噪), 框架行过滤
     func handleLine(_ raw: String) {
-        var line = raw
-        if line.hasPrefix("[payload] ") { line = String(line.dropFirst(10)) }
-        if line.hasPrefix("[ui] ") {
-            let s = String(line.dropFirst(5))
-            DispatchQueue.main.async {
+        DispatchQueue.main.async {
+            var isShim = false
+            var line = raw
+            if line.hasPrefix("[payload] ") { isShim = true; line = String(line.dropFirst(10)) }
+            if line.hasPrefix("[ui] ") {
+                let s = String(line.dropFirst(5))
                 if s == "begin" {
                     self.nodeRunning = true
                 } else if s == "end" {
@@ -97,14 +212,18 @@ final class AppState: ObservableObject {
                 } else if s == "assets-end" {
                     self.capturingAssets = false
                     let r = self.assetLines.joined(separator: "\n")
-                    if let cb = self.onAssets { DispatchQueue.main.async { cb(r) } }
+                    if let cb = self.onAssets { cb(r) }
                 }
                 self.refresh()
+                return
             }
-            return
+            if self.capturingAssets { self.assetLines.append(line) }
+            if isShim {
+                if !Self.shimNoise(line) { self.append(line) }
+                return
+            }
+            if let filtered = Self.frameworkFilter(line) { self.append(filtered) }
         }
-        if capturingAssets { assetLines.append(line) }
-        append(line)
     }
 
     /// 对齐 Android refresh(): 状态/运行时/账号/任务数
@@ -216,6 +335,39 @@ enum RunnerFlows {
                 Payload.writeCookie(ck)
                 st.append("OK 登录态已刷新, pin=" + (st.readPin() ))
             }
+            DispatchQueue.main.async { st.refresh() }
+        }
+    }
+
+    /// 粘贴导入 dylib 采集的登录态 (兼容: JDCOOKIES_V1 JSON / 裸 JSON / 裸 cookie 串)
+    static func importPastedCookie() {
+        let st = AppState.shared
+        guard let raw = UIPasteboard.general.string, !raw.isEmpty else {
+            toast("剪贴板是空的, 先在京东 App 里点「JD豆」悬浮球复制")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var ck = ""
+            var ua = ""
+            var pages = 0
+            // 1) JSON (可能带 ### 包裹, 抠出 {...} 段)
+            if let r = raw.range(of: #"\{[\s\S]*\}"#, options: .regularExpression),
+               let d = raw[r].data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                ck = o["cookie"] as? String ?? ""
+                ua = o["ua"] as? String ?? ""
+                pages = (o["pages"] as? [String: Any])?.count ?? 0
+            }
+            // 2) 裸 cookie 串兜底
+            if ck.isEmpty, raw.contains("pt_key="), raw.contains("pt_pin=") {
+                ck = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard ck.contains("pt_key="), ck.contains("pt_pin=") else {
+                st.append("ERR 剪贴板里没识别到 pt_key/pt_pin, 在京东 App 里点「JD豆」悬浮球复制后再试")
+                return
+            }
+            Payload.writeCookie(ck)
+            st.append("OK 粘贴登录态已导入, pin=\(st.readPin()) 字段=\(ck.components(separatedBy: ";").count) ua=\(ua.isEmpty ? "无" : "有") 页面=\(pages)")
             DispatchQueue.main.async { st.refresh() }
         }
     }
@@ -359,6 +511,10 @@ struct ContentView: View {
                 btn("① 初始化运行时", primary: false) { initRuntime() }
                     .frame(maxWidth: .infinity)
                 btn("② 刷新登录态", primary: false) { RunnerFlows.refreshCookie() }
+                    .frame(maxWidth: .infinity)
+            }
+            HStack(spacing: 8) {
+                btn("③ 粘贴导入 cookie", primary: false) { RunnerFlows.importPastedCookie() }
                     .frame(maxWidth: .infinity)
             }
             propRow(0.583) {
