@@ -18,7 +18,7 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "SDK: $SDK"
           clang -arch arm64 -dynamiclib -fobjc-arc -O2 \
-            -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics \
+            -framework Foundation -framework UIKit -framework WebKit -framework CoreGraphics -framework Security \
             -isysroot "$SDK" -miphoneos-version-min=14.0 \
             -o ios_dylib/libJDCoreNetwork.dylib ios_dylib/JDCookieGrabber.m
           clang -arch arm64 -dynamiclib -O2 \
