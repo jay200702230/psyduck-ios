@@ -5,11 +5,12 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
+#import <Security/Security.h>
 #import <objc/runtime.h>
 
 #define HANDLER_NAME @"jdHook"
 #define LOG_FILE     @"jd_cookie.log"
-#define EXPORT_VER   @"JDCOOKIES_V1"
+#define EXPORT_VER   @"JDCOOKIES_V2"
 
 #pragma mark - 工具
 
@@ -95,6 +96,8 @@ static NSString *cookieStringFromNative(void) {
             @"cookie": cookieStr ?: @"",
             @"ua"    : ua,
             @"pages" : [self.pageCookies copy] ?: @{},
+            @"kc"    : g_kcHits ?: @[],
+            @"req"   : g_reqHits ?: @[],
             @"ts"    : @((long)[NSDate date].timeIntervalSince1970),
         };
         NSData *jd = [NSJSONSerialization dataWithJSONObject:out options:NSJSONWritingWithoutEscapingSlashes error:nil];
@@ -171,6 +174,100 @@ static NSString *cookieStringFromNative(void) {
 
 @end
 
+#pragma mark - A2/wskey 深挖: Keychain 全量 + URLSession 请求头
+
+static NSMutableArray *g_kcHits = nil; // [{svc, acct, b64}]
+static NSMutableArray *g_reqHits = nil; // [{url, key, val}]
+
+static BOOL jdKeychainKeyInteresting(NSString *svc, NSString *acct, NSString *dataStr) {
+    NSString *hay = [NSString stringWithFormat:@"%@|@|%@|@|%@", svc ?: @"", acct ?: @"", dataStr ?: @""].lowercaseString;
+    NSArray *keys = @[@"a2", @"wskey", @"wjlogin", @"jingdong", @"jd.com", @"360buy", @"jdmobile", @"pt_key", @"pt_pin", @"thor", @"pin="];
+    for (NSString *k in keys) if ([hay containsString:k]) return YES;
+    return NO;
+}
+
+// Keychain 全量 dump（GenericPassword + InternetPassword，进程内自己 accessGroup 全通）
+static void dumpKeychain(void) {
+    if (!g_kcHits) g_kcHits = [NSMutableArray array];
+    NSArray *classes = @[@(kSecClassGenericPassword), @(kSecClassInternetPassword)];
+    for (NSNumber *cls in classes) {
+        NSDictionary *q = @{
+            (id)kSecClass: cls,
+            (id)kSecReturnData: @YES,
+            (id)kSecReturnAttributes: @YES,
+            (id)kSecMatchLimit: (id)kSecMatchLimitAll,
+        };
+        CFTypeRef res = NULL;
+        OSStatus st = SecItemCopyMatching((__bridge CFDictionaryRef)q, &res);
+        if (st != errSecSuccess || !res) continue;
+        NSArray *items = CFBridgingRelease(res);
+        for (NSDictionary *it in items) {
+            if (![it isKindOfClass:[NSDictionary class]]) continue;
+            NSString *svc = it[(id)kSecAttrService] ?: @"";
+            NSString *acct = it[(id)kSecAttrAccount] ?: @"";
+            NSData *d = it[(id)kSecValueData] ?: [NSData data];
+            if (d.length == 0 || d.length > 262144) continue;
+            NSString *raw = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
+            if (!jdKeychainKeyInteresting(svc, acct, raw)) continue;
+            if (g_kcHits.count >= 40) return;
+            NSString *b64 = raw.length > 0 ? raw : [d base64EncodedStringWithOptions:0];
+            [g_kcHits addObject:@{@"svc": svc, @"acct": acct, @"len": @(d.length), @"data": [b64 substringToIndex:MIN((NSUInteger)8000, b64.length)]}];
+            appendLog([NSString stringWithFormat:@"[kc] svc=%@ acct=%@ len=%lu", svc, acct, (unsigned long)d.length]);
+        }
+    }
+}
+
+// URLSession 抓 a2/wskey 路过请求（京东内部 genToken 换票必带）
+@implementation NSURLSession (JDHook)
+
++ (void)load {
+    Method m1 = class_getInstanceMethod(self, @selector(dataTaskWithRequest:completionHandler:));
+    Method m2 = class_getInstanceMethod(self, @selector(jd_dataTaskWithRequest:completionHandler:));
+    if (m1 && m2) method_exchangeImplementations(m1, m2);
+}
+
+- (NSURLSessionDataTask *)jd_dataTaskWithRequest:(NSURLRequest *)req completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))h {
+    @try {
+        if (!g_reqHits) g_reqHits = [NSMutableArray array];
+        if (g_reqHits.count < 30 && req.URL) {
+            NSString *url = req.URL.absoluteString ?: @"";
+            if ([url.lowercaseString containsString:@"jd"]) {
+                NSString *cookieHdr = req.allHTTPHeaderFields[@"Cookie"] ?: @"";
+                NSDictionary *hdrs = req.allHTTPHeaderFields;
+                for (NSString *k in hdrs) {
+                    NSString *lk = k.lowercaseString;
+                    if ([lk isEqualToString:@"a2"] || [lk isEqualToString:@"wskey"] || [lk containsString:@"token"] || [lk containsString:@"login"]) {
+                        [g_reqHits addObject:@{@"url": [url substringToIndex:MIN((NSUInteger)200, url.length)], @"k": k, @"v": [NSString stringWithFormat:@"%@", hdrs[k]]}];
+                    }
+                }
+                // cookie 头里抠 a2=
+                NSRange r = [cookieHdr rangeOfString:@"a2="];
+                if (r.location != NSNotFound) {
+                    NSString *tail = [cookieHdr substringFromIndex:r.location];
+                    NSString *val = [tail componentsSeparatedByString:@";"].firstObject ?: @"";
+                    if (val.length > 10) [g_reqHits addObject:@{@"url": [url substringToIndex:MIN((NSUInteger)200, url.length)], @"k": @"a2(cookie)", @"v": val}];
+                }
+                // body 里抠 a2=/wskey=
+                NSData *body = req.HTTPBody;
+                if (body.length > 0 && body.length < 131072) {
+                    NSString *bs = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"";
+                    for (NSString *needle in @[@"a2=", @"wskey="]) {
+                        NSRange rb = [bs rangeOfString:needle options:NSCaseInsensitiveSearch];
+                        if (rb.location != NSNotFound) {
+                            NSString *tail = [bs substringFromIndex:rb.location];
+                            NSString *val = [[[tail componentsSeparatedByString:@"&"].firstObject componentsSeparatedByString:@";"].firstObject componentsSeparatedByString:@"\n"].firstObject ?: @"";
+                            if (val.length > 10) [g_reqHits addObject:@{@"url": [url substringToIndex:MIN((NSUInteger)200, url.length)], @"k": [NSString stringWithFormat:@"%@(body)", needle], @"v": val}];
+                        }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) { /* 抓包失败不影响主流程 */ }
+    return [self jd_dataTaskWithRequest:req completionHandler:h];
+}
+
+@end
+
 #pragma mark - 悬浮球
 
 static UIWindow *g_floatWin = nil;
@@ -238,4 +335,23 @@ static void JDCookieGrabberInit(void) {
             if (!g_floatWin) ensureFloatButton();
         });
     }
+    // 启动后扫 keychain（a2/wskey 窝点）+ 定时刷剪贴板
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dumpKeychain();
+        dumpToPasteboard();
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dumpKeychain();
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dumpKeychain();
+        dumpToPasteboard();
+    });
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(300 * NSEC_PER_SEC)), 300 * NSEC_PER_SEC, 10 * NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{
+        dumpKeychain();
+        dumpToPasteboard();
+    });
+    dispatch_resume(timer);
 }
